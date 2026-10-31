@@ -8,7 +8,10 @@ import zipfile
 
 BIN = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'bin')
 
-rel = json.load(urllib.request.urlopen('https://api.github.com/repos/bluenviron/mediamtx/releases/latest'))
+req = urllib.request.Request('https://api.github.com/repos/bluenviron/mediamtx/releases/latest')
+if os.environ.get('GITHUB_TOKEN'):
+    req.add_header('Authorization', 'Bearer ' + os.environ['GITHUB_TOKEN'])
+rel = json.load(urllib.request.urlopen(req))
 asset = next(a for a in rel['assets'] if a['name'].endswith('windows_amd64.zip'))
 print('downloading', asset['name'])
 data = urllib.request.urlopen(asset['browser_download_url']).read()

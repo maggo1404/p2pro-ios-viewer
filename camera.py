@@ -13,8 +13,8 @@ import numpy as np
 
 from iap2 import Link, msg, usb
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-INIT_CMDS = json.load(open(os.path.join(HERE, 'init_cmds.json')))
+from paths import RES_DIR
+INIT_CMDS = json.load(open(os.path.join(RES_DIR, 'init_cmds.json')))
 
 FRAME_BYTES = 106080                  # 260 x 204 x uint16 (210 USB packets x 506 payload bytes)
 FRAME_SHAPE = (204, 260)

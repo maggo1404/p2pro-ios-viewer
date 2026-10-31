@@ -24,8 +24,8 @@ from camera import IMG_H, IMG_W, Camera, CameraError
 from processing import DEFAULT_CALIB, PALETTES, Processor
 from streaming import Recorder, RtspServer, find_ffmpeg
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-SETTINGS_FILE = os.path.join(HERE, 'settings.json')
+from paths import APP_DIR
+SETTINGS_FILE = os.path.join(APP_DIR, 'settings.json')
 S = 3                                   # output scale: 256x196 -> 768x588 (196x256 when rotated)
 BAR_W = 72                              # colour bar area on the right of the output image
 FPS = 25
@@ -693,7 +693,7 @@ class MainWindow(QMainWindow):
     def snapshot(self):
         if self.temp is None:
             return
-        d = os.path.join(HERE, 'snapshots')
+        d = os.path.join(APP_DIR, 'snapshots')
         os.makedirs(d, exist_ok=True)
         base = os.path.join(d, time.strftime('thermal_%Y%m%d_%H%M%S'))
         self.view.img.save(base + '.png')
@@ -708,7 +708,7 @@ class MainWindow(QMainWindow):
             self.recorder = None
             self.btn_rec.setText('Start recording')
         else:
-            d = os.path.join(HERE, 'recordings')
+            d = os.path.join(APP_DIR, 'recordings')
             os.makedirs(d, exist_ok=True)
             path = os.path.join(d, time.strftime('thermal_%Y%m%d_%H%M%S.mp4'))
             try:

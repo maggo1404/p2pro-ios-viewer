@@ -14,8 +14,8 @@ import numpy as np
 
 from camera import IMG
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-CALIB_FILE = os.path.join(HERE, 'calib.json')
+from paths import RES_DIR, APP_DIR
+CALIB_FILE = os.path.join(APP_DIR, 'calib.json')
 
 # Linear model T = offset + gain * (shutter_ref - raw). Defaults estimated from sensor noise
 # (~3.6 counts rms at the rated 40 mK NETD); refine with the in-app calibration.
@@ -81,11 +81,11 @@ class SuperRes:
         self.nets = {}
 
     def available(self, s):
-        return os.path.exists(os.path.join(HERE, 'models', f'ESPCN_x{s}.onnx'))
+        return os.path.exists(os.path.join(RES_DIR, 'models', f'ESPCN_x{s}.onnx'))
 
     def __call__(self, gray01, s):
         if s not in self.nets:
-            self.nets[s] = cv2.dnn.readNetFromONNX(os.path.join(HERE, 'models', f'ESPCN_x{s}.onnx'))
+            self.nets[s] = cv2.dnn.readNetFromONNX(os.path.join(RES_DIR, 'models', f'ESPCN_x{s}.onnx'))
         net = self.nets[s]
         net.setInput(gray01[None, None].astype(np.float32))
         return net.forward()[0, 0]

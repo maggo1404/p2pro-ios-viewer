@@ -1,0 +1,5 @@
+pyusb
+libusb-package
+numpy
+opencv-python
+PySide6>=6.5

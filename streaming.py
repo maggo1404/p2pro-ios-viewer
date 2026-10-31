@@ -11,8 +11,8 @@ import socket
 import subprocess
 import threading
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-MEDIAMTX = os.path.join(HERE, 'bin', 'mediamtx.exe')
+from paths import RES_DIR, APP_DIR
+MEDIAMTX = os.path.join(RES_DIR, 'bin', 'mediamtx.exe')
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 
 
@@ -105,8 +105,9 @@ class RtspServer:
             raise RuntimeError(f'MediaMTX not found at {MEDIAMTX}. Run: python tools/get_mediamtx.py')
         env = dict(os.environ, MTX_RTSPADDRESS=f':{port}', MTX_RTMP='no', MTX_HLS='no', MTX_WEBRTC='no',
                    MTX_SRT='no', MTX_API='no', MTX_METRICS='no', MTX_PPROF='no', MTX_PLAYBACK='no', MTX_LOGLEVEL='info',
-                   MTX_LOGDESTINATIONS='file', MTX_LOGFILE=os.path.join(HERE, 'bin', 'mediamtx.log'))
-        self.mtx = subprocess.Popen([MEDIAMTX, os.path.join(HERE, 'bin', 'mediamtx.yml')], env=env, cwd=os.path.join(HERE, 'bin'),
+                   MTX_LOGDESTINATIONS='file', MTX_LOGFILE=os.path.join(APP_DIR, 'bin', 'mediamtx.log'))
+        os.makedirs(os.path.join(APP_DIR, 'bin'), exist_ok=True)
+        self.mtx = subprocess.Popen([MEDIAMTX, os.path.join(RES_DIR, 'bin', 'mediamtx.yml')], env=env, cwd=os.path.join(APP_DIR, 'bin'),
                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=NO_WINDOW)
         import time
         time.sleep(0.8)

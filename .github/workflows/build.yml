@@ -1,0 +1,45 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install dependencies
+        run: pip install -r requirements.txt pyinstaller
+      - name: Download MediaMTX
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python tools/get_mediamtx.py
+      - name: Build exe
+        run: pyinstaller p2pro.spec --noconfirm
+      - name: Smoke check
+        shell: pwsh
+        run: |
+          $f = Get-Item dist/P2ProViewer.exe
+          Write-Host "size: $($f.Length)"
+          if ($f.Length -lt 20MB) { throw "exe too small" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: P2ProViewer-windows
+          path: dist/P2ProViewer.exe
+          if-no-files-found: error
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/P2ProViewer.exe

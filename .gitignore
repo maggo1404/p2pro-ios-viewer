@@ -9,3 +9,5 @@ bin/mediamtx.log
 models/sr_test.png
 bin/auto.crt
 bin/auto.key
+dist/
+build/
