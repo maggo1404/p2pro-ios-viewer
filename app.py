@@ -608,7 +608,8 @@ class MainWindow(QMainWindow):
     def qimage_to_bgr(q):
         q = q.convertToFormat(QImage.Format_BGR888)
         a = np.frombuffer(q.constBits(), np.uint8, q.sizeInBytes()).reshape(q.height(), q.bytesPerLine())
-        return np.ascontiguousarray(a[:, :q.width() * 3].reshape(q.height(), q.width(), 3))
+        # always copy: `a` points into q's buffer, which is freed when q goes out of scope
+        return a[:, :q.width() * 3].reshape(q.height(), q.width(), 3).copy()
 
     def update_status(self):
         parts = [f'{self.fps:.1f} fps', f'processing {self.proc_ms:.0f} ms']
