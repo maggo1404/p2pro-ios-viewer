@@ -30,6 +30,11 @@ python app.py              # full app with side panel
 python viewer.py           # minimal OpenCV-only viewer
 ```
 
+* **Driver (Windows):** on start the app checks whether the libusbK driver (`P2Pro.inf`) is installed. If not
+  it asks whether to install it: it looks up "Temp Master (P-Serie)" on thermalmaster.com's download center,
+  downloads that installer (~55 MB, needs internet), unpacks only its `drivers` folder (pure Python, the installer
+  is never run) and installs the driver via `pnputil` with a UAC prompt (admin rights). The side panel button
+  "Install driver..." does the same on demand. Replug the camera afterwards. Code: `driver.py`, `inno.py`.
 * The camera shows up as `USB\VID_0BDA&PID_5840`. It was tested with the **libusbK** driver, which on
   the test PC had been installed by the Thermal Master PC app (its `drivers/inf/P2Pro.inf`). Close
   Thermal Master before starting.

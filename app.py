@@ -18,8 +18,9 @@ from PySide6.QtCore import QPointF, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QImage, QKeySequence, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
                                QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox,
-                               QPushButton, QRadioButton, QScrollArea, QSlider, QSpinBox, QVBoxLayout, QWidget)
+                               QProgressDialog, QPushButton, QRadioButton, QScrollArea, QSlider, QSpinBox, QVBoxLayout, QWidget)
 
+import driver
 import exporting
 from camera import IMG_H, IMG_W, Camera, CameraError
 from processing import DEFAULT_CALIB, PALETTES, Processor, orient_point, unorient_point
@@ -156,6 +157,9 @@ class ImageView(QWidget):
 # =====================================================================================
 class MainWindow(QMainWindow):
     log_signal = Signal(str)
+    drv_status = Signal(str)
+    drv_progress = Signal(int, int)
+    drv_done = Signal(bool, str)
 
     def __init__(self):
         super().__init__()
@@ -175,6 +179,11 @@ class MainWindow(QMainWindow):
         self.recorder = self.rtsp = None
         self.fps_count, self.fps_t, self.fps = 0, time.time(), 0.0
         self.proc_ms = 0.0
+        self.drv_busy = False
+        self.drv_cancel = threading.Event()
+        self.drv_dialog = None
+        self.drv_offered = False
+        self.drv_connect_after = True
 
         self.view = ImageView()
         self.view.clicked.connect(self.on_click)
@@ -195,6 +204,9 @@ class MainWindow(QMainWindow):
         self.status = QLabel()
         self.statusBar().addWidget(self.status, 1)
         self.log_signal.connect(self.on_log)
+        self.drv_status.connect(self.on_drv_status)
+        self.drv_progress.connect(self.on_drv_progress)
+        self.drv_done.connect(self.on_drv_done)
         self.add_shortcuts()
         self.load_settings()
         self.resize(1200, 700)
@@ -202,7 +214,10 @@ class MainWindow(QMainWindow):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
         self.timer.start(5)
-        QTimer.singleShot(200, self.connect_camera)
+        if driver.is_windows():
+            QTimer.singleShot(100, self.check_driver)       # connecting is started afterwards if the driver is fine
+        else:
+            QTimer.singleShot(200, self.connect_camera)
 
     # ------------------------------------------------------------------ panel
     def build_panel(self):
@@ -231,6 +246,10 @@ class MainWindow(QMainWindow):
         f.addWidget(self.btn_connect)
         f.addWidget(self.btn_shutter)
         f.addLayout(row)
+        self.btn_driver = QPushButton('Install driver...')
+        self.btn_driver.setToolTip('Download the camera driver from thermalmaster.com and install it (needs admin rights)')
+        self.btn_driver.clicked.connect(lambda: self.offer_driver_install(manual=True))
+        f.addWidget(self.btn_driver)
         v.addWidget(g)
 
         # --- measurement
@@ -421,6 +440,80 @@ class MainWindow(QMainWindow):
             a.triggered.connect(fn)
             self.addAction(a)
 
+    # ------------------------------------------------------------------ driver
+    def check_driver(self, connect=True):
+        self.drv_connect_after = connect
+
+        def work():
+            ok = driver.is_driver_installed()
+            self.log_signal.emit('@driver ' + ('missing' if ok is False else 'ok'))
+        threading.Thread(target=work, daemon=True).start()
+
+    def offer_driver_install(self, manual=False):
+        if self.drv_busy:
+            return
+        if not driver.is_windows():
+            QMessageBox.information(self, 'Install driver', 'The driver is only needed (and can only be installed) on Windows.')
+            return
+        text = ('The camera driver (libusbK, USB 0BDA:5840) does not seem to be installed.\n\n'
+                'It can be downloaded from thermalmaster.com (the "Temp Master (P-Serie)" package, ~55 MB) and '
+                'installed now. Windows will ask for administrator permission.\n\nInstall the driver?')
+        if manual:
+            text = ('Download the camera driver from thermalmaster.com (the "Temp Master (P-Serie)" package, ~55 MB) '
+                    'and install it? Windows will ask for administrator permission.')
+        if QMessageBox.question(self, 'Camera driver', text, QMessageBox.Yes | QMessageBox.No,
+                                QMessageBox.Yes) != QMessageBox.Yes:
+            return
+        self.drv_busy = True
+        self.btn_driver.setEnabled(False)
+        self.drv_cancel.clear()
+        dlg = QProgressDialog('Starting...', 'Cancel', 0, 0, self)
+        dlg.setWindowTitle('Installing camera driver')
+        dlg.setWindowModality(Qt.WindowModal)
+        dlg.setMinimumDuration(0)
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
+        dlg.canceled.connect(self.drv_cancel.set)
+        dlg.show()
+        self.drv_dialog = dlg
+
+        def work():
+            try:
+                msg = driver.install_from_download(self.drv_status.emit, self.drv_progress.emit, self.drv_cancel)
+                self.drv_done.emit(True, msg)
+            except driver.DriverCancelled as e:
+                self.drv_done.emit(False, '' if str(e) == 'cancelled' else str(e))
+            except driver.DriverError as e:
+                self.drv_done.emit(False, str(e))
+            except Exception as e:
+                self.drv_done.emit(False, f'{type(e).__name__}: {e}')
+        threading.Thread(target=work, daemon=True).start()
+
+    def on_drv_status(self, s):
+        if self.drv_dialog:
+            self.drv_dialog.setLabelText(s)
+            if 'administrator' in s or 'vendor' in s:       # past the point where cancelling is possible
+                self.drv_dialog.setCancelButton(None)
+                self.drv_dialog.setRange(0, 0)
+
+    def on_drv_progress(self, done, total):
+        if self.drv_dialog and total:
+            self.drv_dialog.setRange(0, total)
+            self.drv_dialog.setValue(min(done, total))
+            self.drv_dialog.setLabelText(f'Downloading... {done / 1e6:.1f} / {total / 1e6:.1f} MB')
+
+    def on_drv_done(self, ok, msg):
+        self.drv_busy = False
+        self.btn_driver.setEnabled(True)
+        if self.drv_dialog:
+            self.drv_dialog.canceled.disconnect()           # close() would emit canceled()
+            self.drv_dialog.close()
+            self.drv_dialog = None
+        if ok:
+            QMessageBox.information(self, 'Camera driver', msg)
+        elif msg:
+            QMessageBox.warning(self, 'Camera driver', 'The driver could not be installed.\n\n' + msg)
+
     # ------------------------------------------------------------------ camera
     def connect_camera(self):
         if self.connecting:
@@ -448,7 +541,15 @@ class MainWindow(QMainWindow):
         threading.Thread(target=work, daemon=True).start()
 
     def on_log(self, s):
-        if s == '@connected':
+        if s == '@driver missing':
+            self.drv_offered = True
+            self.offer_driver_install()
+            if self.drv_connect_after and not self.drv_busy:
+                self.connect_camera()                   # declined: still try, the driver check can be wrong
+        elif s == '@driver ok':
+            if self.drv_connect_after:
+                self.connect_camera()
+        elif s == '@connected':
             self.connecting = False
             self.btn_connect.setEnabled(True)
             self.cam_label.setText('connected, streaming')
@@ -460,6 +561,9 @@ class MainWindow(QMainWindow):
             self.cam_label.setText('<b>not connected</b>: ' + s[8:])
             self.view.message = 'No camera.\n\n' + s[8:] + '\n\nUnplug the camera, plug it back in, then press Connect.'
             self.view.update()
+            if 'camera not found' in s and driver.is_windows() and not self.drv_offered and not self.drv_busy:
+                self.drv_offered = True
+                self.check_driver(connect=False)
         else:
             print(s)
 
