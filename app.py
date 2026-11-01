@@ -16,12 +16,13 @@ import cv2
 import numpy as np
 from PySide6.QtCore import QPointF, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QImage, QKeySequence, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout,
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
                                QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox,
                                QPushButton, QRadioButton, QScrollArea, QSlider, QSpinBox, QVBoxLayout, QWidget)
 
+import exporting
 from camera import IMG_H, IMG_W, Camera, CameraError
-from processing import DEFAULT_CALIB, PALETTES, Processor
+from processing import DEFAULT_CALIB, PALETTES, Processor, orient_point, unorient_point
 from streaming import Recorder, RtspServer, find_ffmpeg
 
 from paths import APP_DIR
@@ -313,17 +314,20 @@ class MainWindow(QMainWindow):
                                    if not u.startswith('Super') or self.proc.sr.available(int(u.split('x')[1][0]))])
         self.cmb_upscale.currentTextChanged.connect(lambda t: setattr(self.proc, 'upscale', t))
         f.addRow('Upscaling', self.cmb_upscale)
+        self.cmb_rotation = QComboBox()
+        self.cmb_rotation.addItems(['0°', '90°', '180°', '270°'])
+        self.cmb_rotation.setToolTip('Rotate the image clockwise (shortcut R = next step)')
+        self.cmb_rotation.currentIndexChanged.connect(lambda _i: self.orientation_widgets_changed())
+        f.addRow('Rotation', self.cmb_rotation)
         row = QHBoxLayout()
-        self.cb_flip_h, self.cb_flip_v = QCheckBox('Mirror'), QCheckBox('Flip vertical')
-        self.cb_flip_h.toggled.connect(lambda b: (setattr(self.proc, 'flip_h', b), self.clear_all()))
-        self.cb_flip_v.toggled.connect(lambda b: (setattr(self.proc, 'flip_v', b), self.clear_all()))
+        self.cb_flip_h, self.cb_flip_v = QCheckBox('Mirror horizontal'), QCheckBox('Mirror vertical')
+        self.cb_flip_h.setToolTip('Mirror left/right on screen (applied after rotation)')
+        self.cb_flip_v.setToolTip('Mirror top/bottom on screen (applied after rotation)')
+        self.cb_flip_h.toggled.connect(lambda _b: self.orientation_widgets_changed())
+        self.cb_flip_v.toggled.connect(lambda _b: self.orientation_widgets_changed())
         row.addWidget(self.cb_flip_h)
         row.addWidget(self.cb_flip_v)
-        f.addRow('', row)
-        self.btn_rotate = QPushButton('Rotate 90° ⟳')
-        self.btn_rotate.setToolTip('Rotate the image 90° clockwise (shortcut R)')
-        self.btn_rotate.clicked.connect(self.rotate)
-        f.addRow('', self.btn_rotate)
+        f.addRow('Mirror', row)
         v.addWidget(g)
 
         # --- enhancement
@@ -363,12 +367,31 @@ class MainWindow(QMainWindow):
         f = QVBoxLayout(g)
         row = QHBoxLayout()
         b = QPushButton('Snapshot')
-        b.setToolTip('PNG image + CSV with temperatures of every pixel (snapshots folder)')
+        b.setToolTip('Quick save (S): screenshot + per-pixel temperature data, auto-named in the snapshots folder, '
+                     'in the formats chosen below')
         b.clicked.connect(self.snapshot)
+        b_exp = QPushButton('Export…')
+        b_exp.setToolTip('Choose the file name and folder; the temperature data is saved next to the image '
+                         'with the same name')
+        b_exp.clicked.connect(self.export_dialog)
         self.btn_rec = QPushButton('Start recording')
         self.btn_rec.clicked.connect(self.toggle_record)
         row.addWidget(b)
-        row.addWidget(self.btn_rec)
+        row.addWidget(b_exp)
+        f.addLayout(row)
+        f.addWidget(self.btn_rec)
+        row = QHBoxLayout()
+        self.cmb_snap_image = QComboBox()
+        self.cmb_snap_image.addItems([n for n, _ in exporting.IMAGE_FORMATS])
+        self.cmb_snap_image.setToolTip('Screenshot format (includes overlays and colour bar)')
+        self.cmb_snap_data = QComboBox()
+        self.cmb_snap_data.addItems([n for n, _ in exporting.DATA_FORMATS])
+        self.cmb_snap_data.setToolTip('Per-pixel temperatures (in the selected unit, same pixel grid as the '
+                                      'unscaled image): CSV / XML text, or float32 TIFF for ImageJ / Python')
+        row.addWidget(QLabel('Image'))
+        row.addWidget(self.cmb_snap_image)
+        row.addWidget(QLabel('Data'))
+        row.addWidget(self.cmb_snap_data)
         f.addLayout(row)
         self.btn_rtsp = QPushButton('Start RTSP stream')
         self.btn_rtsp.clicked.connect(self.toggle_rtsp)
@@ -380,10 +403,10 @@ class MainWindow(QMainWindow):
         self.cb_overlay_out = QCheckBox('Include cursors / labels in recording and stream')
         self.cb_overlay_out.setChecked(True)
         f.addWidget(self.cb_overlay_out)
-        if not find_ffmpeg():
-            for b in (self.btn_rec, self.btn_rtsp):
-                b.setEnabled(False)
-                b.setToolTip('ffmpeg not found on PATH')
+        if not find_ffmpeg():             # recording falls back to OpenCV; RTSP needs ffmpeg
+            self.btn_rtsp.setEnabled(False)
+            self.btn_rtsp.setToolTip('ffmpeg not found')
+            self.btn_rec.setToolTip('ffmpeg not found: recording uses OpenCV (MPEG-4, larger files)')
         v.addWidget(g)
         v.addStretch(1)
         self.update_cal_label()
@@ -585,7 +608,8 @@ class MainWindow(QMainWindow):
     def qimage_to_bgr(q):
         q = q.convertToFormat(QImage.Format_BGR888)
         a = np.frombuffer(q.constBits(), np.uint8, q.sizeInBytes()).reshape(q.height(), q.bytesPerLine())
-        return np.ascontiguousarray(a[:, :q.width() * 3].reshape(q.height(), q.width(), 3))
+        # always copy: `a` points into q's buffer, which is freed when q goes out of scope
+        return a[:, :q.width() * 3].reshape(q.height(), q.width(), 3).copy()
 
     def update_status(self):
         parts = [f'{self.fps:.1f} fps', f'processing {self.proc_ms:.0f} ms']
@@ -678,28 +702,115 @@ class MainWindow(QMainWindow):
             w, h = IMG_W * S + BAR_W, IMG_H * S
         return w // 2 * 2, h // 2 * 2
 
+    def orientation_widgets_changed(self):
+        self.set_orientation(self.cmb_rotation.currentIndex(), self.cb_flip_h.isChecked(), self.cb_flip_v.isChecked())
+
+    def set_orientation(self, rotation, flip_h, flip_v):
+        """change rotation / mirroring; cursors and rectangles stay on the same scene spot"""
+        old = (self.proc.rotation, self.proc.flip_h, self.proc.flip_v)
+        new = (int(rotation) % 4, bool(flip_h), bool(flip_v))
+        if new != old:
+            def move(x, y):
+                sx, sy = unorient_point(x, y, IMG_W, IMG_H, *old)
+                return orient_point(sx, sy, IMG_W, IMG_H, *new)
+            self.points = [move(x, y) for x, y in self.points]
+            rects = []
+            for x0, y0, x1, y1 in self.rects:
+                ax, ay = move(x0, y0)
+                bx, by = move(x1, y1)
+                rects.append((min(ax, bx), min(ay, by), max(ax, bx), max(ay, by)))
+            self.rects = rects
+            self.proc.rotation, self.proc.flip_h, self.proc.flip_v = new
+        # keep the widgets in sync when called programmatically
+        for w_, fn, val in ((self.cmb_rotation, 'setCurrentIndex', new[0]), (self.cb_flip_h, 'setChecked', new[1]),
+                            (self.cb_flip_v, 'setChecked', new[2])):
+            w_.blockSignals(True)
+            getattr(w_, fn)(val)
+            w_.blockSignals(False)
+
     def rotate(self):
-        """rotate 90 degrees clockwise; cursors and rectangles rotate with the image"""
-        h = self.temp.shape[0] if self.temp is not None else (IMG_H if self.proc.rotation % 2 == 0 else IMG_W)
-        self.points = [(h - 1 - y, x) for x, y in self.points]
-        self.rects = [(h - 1 - y1, x0, h - 1 - y0, x1) for x0, y0, x1, y1 in self.rects]
-        self.proc.rotation = (self.proc.rotation + 1) % 4
+        """next rotation step (90 degrees clockwise, wraps); shortcut R"""
+        self.cmb_rotation.setCurrentIndex((self.cmb_rotation.currentIndex() + 1) % 4)
 
     def units_changed(self, f):
         for sp in (self.sp_min, self.sp_max):
             sp.setValue(c2u(u2c(sp.value(), not f), f))
 
     # ------------------------------------------------------------------ outputs
+    def _export_meta(self):
+        meta = {'camera': 'P2 Pro', 'palette': self.proc.palette}
+        if self.last_range:
+            meta['display_range_C'] = '%.2f..%.2f' % tuple(self.last_range)
+        meta['rotation_deg'] = self.proc.rotation * 90
+        meta['flip_h'] = self.cb_flip_h.isChecked()
+        meta['flip_v'] = self.cb_flip_v.isChecked()
+        c = self.proc.calib
+        meta['calibration'] = 'gain=%.5f offset=%.3f' % (c['gain'], c['offset'])
+        return meta
+
+    def _write_export(self, base, image_ext, data_ext, bgr, temp, fahrenheit, meta):
+        """Write image (+ data if data_ext) to base+ext; returns list of written paths."""
+        paths = [base + image_ext]
+        exporting.save_image(paths[0], bgr)
+        if data_ext:
+            paths.append(base + data_ext)
+            exporting.save_temperature(paths[1], temp, 'F' if fahrenheit else 'C', meta)
+        return paths
+
+    def _capture_export(self):
+        """Grab image and temperatures at the same moment (frames keep arriving)."""
+        if self.temp is None or self.view.img is None:
+            return None
+        return (self.qimage_to_bgr(self.view.img.copy()), self.temp.copy(),
+                self.cb_fahrenheit.isChecked(), self._export_meta())
+
+    def _snap_exts(self):
+        return (dict(exporting.IMAGE_FORMATS)[self.cmb_snap_image.currentText()],
+                dict(exporting.DATA_FORMATS)[self.cmb_snap_data.currentText()])
+
+    def _report_export(self, paths, f):
+        self.statusBar().showMessage('saved ' + ' + '.join(paths) + f' ({"°F" if f else "°C"} per pixel)', 8000)
+
     def snapshot(self):
-        if self.temp is None:
+        cap = self._capture_export()
+        if cap is None:
             return
         d = os.path.join(APP_DIR, 'snapshots')
+        image_ext, data_ext = self._snap_exts()
+        try:
+            os.makedirs(d, exist_ok=True)
+            paths = self._write_export(os.path.join(d, time.strftime('thermal_%Y%m%d_%H%M%S')),
+                                       image_ext, data_ext, *cap)
+        except Exception as e:
+            QMessageBox.warning(self, 'Snapshot', str(e))
+            return
+        self._report_export(paths, cap[2])
+
+    def export_dialog(self):
+        """One file dialog for the image; the data file goes next to it with the same base name."""
+        cap = self._capture_export()          # before the dialog: frames keep arriving meanwhile
+        if cap is None:
+            return
+        image_ext, data_ext = self._snap_exts()
+        name = self.cmb_snap_image.currentText()
+        d = os.path.join(APP_DIR, 'snapshots')
         os.makedirs(d, exist_ok=True)
-        base = os.path.join(d, time.strftime('thermal_%Y%m%d_%H%M%S'))
-        self.view.img.save(base + '.png')
-        f = self.cb_fahrenheit.isChecked()
-        np.savetxt(base + '.csv', c2u(self.temp, f), fmt='%.2f', delimiter=',')
-        self.statusBar().showMessage(f'saved {base}.png / .csv ({"°F" if f else "°C"} per pixel)', 5000)
+        start = os.path.join(d, time.strftime('thermal_%Y%m%d_%H%M%S') + image_ext)
+        path, _ = QFileDialog.getSaveFileName(self, 'Export snapshot', start,
+                                              f'{name} (*{image_ext})' + (';;JPEG (*.jpeg)' if image_ext == '.jpg' else ''))
+        if not path:
+            return
+        base, ext = os.path.splitext(path)
+        if ext.lower() in exporting.IMAGE_EXTS:
+            image_ext = ext
+        else:
+            base = path
+        try:
+            paths = self._write_export(base, image_ext, data_ext, *cap)
+        except Exception as e:
+            QMessageBox.warning(self, 'Export', str(e))
+            return
+        self._report_export(paths, cap[2])
 
     def toggle_record(self):
         if self.recorder:
@@ -714,6 +825,7 @@ class MainWindow(QMainWindow):
             try:
                 self.recorder = Recorder(path, self.out_size(), FPS, log=print)
                 self.btn_rec.setText('■ Stop recording')
+                self.statusBar().showMessage(f'recording {path} ({self.recorder.backend})', 5000)
             except Exception as e:
                 QMessageBox.warning(self, 'Recording', str(e))
         self.update_status()
@@ -741,8 +853,9 @@ class MainWindow(QMainWindow):
              'upscale': self.cmb_upscale.currentText(), 'fixed': self.rb_fixed.isChecked(),
              'min': self.sp_min.value(), 'max': self.sp_max.value(), 'smooth_range': self.cb_smooth_range.isChecked(),
              'fahrenheit': self.cb_fahrenheit.isChecked(), 'hotcold': self.cb_hotcold.isChecked(),
-             'center': self.cb_center.isChecked(), 'rotation': self.proc.rotation, 'flip_h': self.cb_flip_h.isChecked(), 'flip_v': self.cb_flip_v.isChecked(),
-             'autoshutter': self.sp_autoshutter.value(), 'overlay_out': self.cb_overlay_out.isChecked(), 'enh': {}}
+             'center': self.cb_center.isChecked(), 'rotation': self.cmb_rotation.currentIndex(), 'flip_h': self.cb_flip_h.isChecked(), 'flip_v': self.cb_flip_v.isChecked(),
+             'autoshutter': self.sp_autoshutter.value(), 'overlay_out': self.cb_overlay_out.isChecked(),
+             'snap_image': self.cmb_snap_image.currentText(), 'snap_data': self.cmb_snap_data.currentText(), 'enh': {}}
         for k, (cb, sl, *_rest) in self.enh.items():
             s['enh'][k] = [cb.isChecked(), sl.value() if sl else None]
         return s
@@ -768,11 +881,11 @@ class MainWindow(QMainWindow):
         self.cb_smooth_range.setChecked(s.get('smooth_range', True))
         self.cb_hotcold.setChecked(s.get('hotcold', True))
         self.cb_center.setChecked(s.get('center', False))
-        self.cb_flip_h.setChecked(s.get('flip_h', False))
-        self.cb_flip_v.setChecked(s.get('flip_v', False))
-        self.proc.rotation = int(s.get('rotation', 0)) % 4
+        self.set_orientation(int(s.get('rotation', 0)), bool(s.get('flip_h', False)), bool(s.get('flip_v', False)))
         self.sp_autoshutter.setValue(s.get('autoshutter', 60))
         self.cb_overlay_out.setChecked(s.get('overlay_out', True))
+        self.cmb_snap_image.setCurrentText(s.get('snap_image', 'PNG'))
+        self.cmb_snap_data.setCurrentText(s.get('snap_data', 'CSV'))
         enh = {**defaults, **s.get('enh', {})}
         for k, (cb, sl, attr_on, attr_val, lo, hi) in self.enh.items():
             on, val = enh[k]

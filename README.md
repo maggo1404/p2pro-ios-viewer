@@ -35,7 +35,10 @@ python viewer.py           # minimal OpenCV-only viewer
   Thermal Master before starting.
 * **Unplug and replug the camera before every start.** After a session ends, the camera didn't
   answer a new handshake in our tests until it was power-cycled.
-* Recording and RTSP need **ffmpeg** on PATH. RTSP also needs MediaMTX: `python tools/get_mediamtx.py`.
+* Recording and RTSP use **ffmpeg**. The Windows exe contains it (taken from the `imageio-ffmpeg`
+  package at build time); from source it's found on PATH or via `imageio-ffmpeg` (in `requirements.txt`). Without any ffmpeg, recording falls back to OpenCV
+  (MPEG-4 Part 2 instead of H.264, larger files) and RTSP is disabled. RTSP also needs MediaMTX:
+  `python tools/get_mediamtx.py`.
 
 ### App features (`app.py`)
 * **Measurement**: click = temperature cursor, drag = rectangle (max / min / average, hottest and
@@ -43,16 +46,20 @@ python viewer.py           # minimal OpenCV-only viewer
   center crosshair; °C / °F; temperature calibration (see below).
 * **Display**: 9 palettes; auto scale (coldest pixel = bottom of the scale, hottest = top) or fixed
   range, "Lock current" freezes the current auto range; contrast mapping linear / plateau histogram
-  equalization / CLAHE; mirror / flip; rotate in 90° steps (cursors and rectangles rotate along).
+  equalization / CLAHE; rotation 0° / 90° / 180° / 270° and mirroring horizontally / vertically (applied
+  after the rotation, i.e. on the screen axes; cursors and rectangles move along).
 * **Image enhancement**: bad-pixel repair, stripe (row/column noise) removal, motion-adaptive temporal
   denoise (these three are applied before the temperature conversion, so they affect readings);
   detail enhancement (DDE), sharpening and upscaling: nearest / bicubic / Lanczos / **ESPCN neural
   super-resolution ×2 / ×3 / ×4** (these only change the picture). With a non-linear contrast mode
   (histogram / CLAHE) the colour bar labels don't map linearly to the colours.
-* **Output**: snapshot (PNG + CSV with every pixel's temperature, `snapshots/`), MP4 recording
+* **Output**: snapshot (S, auto-named in `snapshots/`) or *Export…* (file dialog): screenshot as PNG or
+  JPEG plus the temperature of every pixel as CSV, XML or 32-bit float TIFF (opens in ImageJ/Fiji,
+  Python, MATLAB), in °C or °F, in the displayed orientation, with metadata (time, palette, range,
+  rotation, calibration); MP4 recording
   (`recordings/`), **RTSP stream** at `rtsp://<pc-ip>:8554/thermal` (URL shown in the panel).
 * Settings are saved in `settings.json`. Keyboard shortcuts: Del = clear all, S = snapshot,
-  C = shutter calibration, R = rotate 90°, A = auto/fixed scale, Esc = cancel calibration.
+  C = shutter calibration, R = next rotation step, A = auto/fixed scale, Esc = cancel calibration.
 
 **Testing:** the author used `app.py` with the real camera. The RTSP stream was only received by an
 ffmpeg client on the same PC, not from another device.

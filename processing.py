@@ -92,6 +92,46 @@ class SuperRes:
 
 
 # ---------------------------------------------------------------- pipeline
+
+# ---- orientation: rotate clockwise first, then mirror the *displayed* axes ----
+def orient_array(a, rotation, flip_h, flip_v):
+    """sensor-orientation array -> displayed array (contiguous copy-safe)"""
+    if rotation % 4:
+        a = np.rot90(a, -(rotation % 4))
+    if flip_h:
+        a = a[:, ::-1]
+    if flip_v:
+        a = a[::-1]
+    return np.ascontiguousarray(a)
+
+
+def orient_point(x, y, w, h, rotation, flip_h, flip_v):
+    """sensor pixel (x, y) of a w x h sensor -> displayed pixel; matches orient_array"""
+    for _ in range(rotation % 4):                      # one clockwise quarter turn: (x, y) -> (h-1-y, x)
+        x, y, w, h = h - 1 - y, x, h, w
+    if flip_h:
+        x = w - 1 - x
+    if flip_v:
+        y = h - 1 - y
+    return x, y
+
+
+def orient_size(w, h, rotation):
+    return (h, w) if rotation % 2 else (w, h)
+
+
+def unorient_point(x, y, w, h, rotation, flip_h, flip_v):
+    """inverse of orient_point (w, h = sensor size)"""
+    dw, dh = orient_size(w, h, rotation)
+    if flip_v:
+        y = dh - 1 - y
+    if flip_h:
+        x = dw - 1 - x
+    for _ in range(rotation % 4):                      # inverse quarter turn: (x', y') -> (y', h-1-x'), pre-turn h = current width
+        x, y, dw, dh = y, dw - 1 - x, dh, dw
+    return x, y
+
+
 class Processor:
     UPSCALE = ['Nearest', 'Bicubic', 'Lanczos', 'Super-res x2 (ESPCN)', 'Super-res x3 (ESPCN)', 'Super-res x4 (ESPCN)']
     CONTRAST = ['Linear', 'Histogram equalization', 'CLAHE (local contrast)']
@@ -153,13 +193,9 @@ class Processor:
             d = w * self._prev + (1 - w) * d
         self._prev = d
         t = self.calib['offset'] + self.calib['gain'] * d
-        if self.flip_h:
-            d, t = d[:, ::-1], t[:, ::-1]
-        if self.flip_v:
-            d, t = d[::-1], t[::-1]
-        if self.rotation:
-            d, t = np.rot90(d, -self.rotation), np.rot90(t, -self.rotation)
-        return np.ascontiguousarray(d), np.ascontiguousarray(t)
+        d = orient_array(d, self.rotation, self.flip_h, self.flip_v)
+        t = orient_array(t, self.rotation, self.flip_h, self.flip_v)
+        return d, t
 
     # ---- display ----
     def render(self, t, lo, hi):
