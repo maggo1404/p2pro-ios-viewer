@@ -403,10 +403,10 @@ class MainWindow(QMainWindow):
         self.cb_overlay_out = QCheckBox('Include cursors / labels in recording and stream')
         self.cb_overlay_out.setChecked(True)
         f.addWidget(self.cb_overlay_out)
-        if not find_ffmpeg():
-            for b in (self.btn_rec, self.btn_rtsp):
-                b.setEnabled(False)
-                b.setToolTip('ffmpeg not found on PATH')
+        if not find_ffmpeg():             # recording falls back to OpenCV; RTSP needs ffmpeg
+            self.btn_rtsp.setEnabled(False)
+            self.btn_rtsp.setToolTip('ffmpeg not found')
+            self.btn_rec.setToolTip('ffmpeg not found: recording uses OpenCV (MPEG-4, larger files)')
         v.addWidget(g)
         v.addStretch(1)
         self.update_cal_label()
@@ -825,6 +825,7 @@ class MainWindow(QMainWindow):
             try:
                 self.recorder = Recorder(path, self.out_size(), FPS, log=print)
                 self.btn_rec.setText('■ Stop recording')
+                self.statusBar().showMessage(f'recording {path} ({self.recorder.backend})', 5000)
             except Exception as e:
                 QMessageBox.warning(self, 'Recording', str(e))
         self.update_status()

@@ -1,9 +1,12 @@
-"""Video outputs: RTSP server (MediaMTX + ffmpeg) and MP4 recording (ffmpeg).
+"""Video outputs: RTSP server (MediaMTX + ffmpeg) and MP4 recording (ffmpeg, or OpenCV as fallback).
 
 Frames (BGR uint8, fixed size) are piped raw into ffmpeg, which encodes H.264.
+ffmpeg is taken from bin/ (bundled in the exe), PATH, or the imageio-ffmpeg pip package, in that order.
+Without any ffmpeg, recording falls back to OpenCV's VideoWriter (MPEG-4 Part 2, larger files).
 For RTSP, ffmpeg publishes to a local MediaMTX server; clients connect to
 rtsp://<this-pc>:8554/thermal (VLC, OBS, ffplay, NVRs, ...).
 """
+import glob
 import os
 import queue
 import shutil
@@ -17,7 +20,18 @@ NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 
 
 def find_ffmpeg():
-    return shutil.which('ffmpeg') or next((p for p in (r'C:\Data\programs\ffmpeg\bin\ffmpeg.exe',) if os.path.exists(p)), None)
+    bundled = sorted(glob.glob(os.path.join(RES_DIR, 'bin', 'ffmpeg*.exe')))   # put there by p2pro.spec
+    if bundled:
+        return bundled[-1]
+    ff = shutil.which('ffmpeg') or next((p for p in (r'C:\Data\programs\ffmpeg\bin\ffmpeg.exe',) if os.path.exists(p)), None)
+    if ff:
+        return ff
+    try:
+        import imageio_ffmpeg                       # pip package that ships an ffmpeg binary
+        ff = imageio_ffmpeg.get_ffmpeg_exe()
+        return ff if ff and os.path.exists(ff) else None
+    except Exception:
+        return None
 
 
 def lan_ip():
@@ -31,35 +45,73 @@ def lan_ip():
         s.close()
 
 
-class FFmpegSink:
-    """Feeds frames to an ffmpeg process in a background thread; drops frames if ffmpeg lags."""
+class _ThreadedSink:
+    """Hands frames to a background writer thread; drops frames if the writer lags."""
+
+    def _start(self):
+        self.q = queue.Queue(maxsize=8)
+        self.alive = True
+        self.done = threading.Event()
+        threading.Thread(target=self._writer, daemon=True).start()
+
+    def _writer(self):
+        try:
+            while self.alive:
+                try:
+                    f = self.q.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+                if f is None:                       # end marker from _stop(): everything before it is written
+                    break
+                try:
+                    self._write(f)
+                except OSError:
+                    self.alive = False
+        finally:
+            self._finish()
+            self.done.set()
+
+    def push(self, bgr):
+        if not self.alive:
+            return
+        try:
+            self.q.put_nowait(self._prepare(bgr))
+        except queue.Full:
+            pass
+
+    def _stop(self, timeout=5):
+        """Write the frames still queued, then let the writer thread finish."""
+        if self.alive:
+            try:
+                self.q.put(None, timeout=timeout)
+            except queue.Full:
+                pass
+        self.alive = False
+        self.done.wait(timeout)
+
+
+class FFmpegSink(_ThreadedSink):
+    """Pipes raw BGR frames into an ffmpeg process."""
 
     def __init__(self, args, size, fps, log):
         ff = find_ffmpeg()
         if not ff:
-            raise RuntimeError('ffmpeg not found on PATH')
+            raise RuntimeError('ffmpeg not found (install it or `pip install imageio-ffmpeg`)')
         w, h = size
         cmd = [ff, '-hide_banner', '-loglevel', 'error', '-f', 'rawvideo', '-pix_fmt', 'bgr24',
                '-s', f'{w}x{h}', '-r', str(fps), '-i', '-'] + args
         self.p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=NO_WINDOW)
-        self.q = queue.Queue(maxsize=8)
         self.log = log
-        self.alive = True
-        threading.Thread(target=self._writer, daemon=True).start()
+        self._start()
         threading.Thread(target=self._stderr, daemon=True).start()
 
-    def _writer(self):
-        while self.alive:
-            try:
-                f = self.q.get(timeout=0.5)
-            except queue.Empty:
-                continue
-            if f is None:
-                break
-            try:
-                self.p.stdin.write(f)
-            except OSError:
-                self.alive = False
+    def _prepare(self, bgr):
+        return bgr.tobytes()
+
+    def _write(self, f):
+        self.p.stdin.write(f)
+
+    def _finish(self):
         try:
             self.p.stdin.close()
         except OSError:
@@ -69,28 +121,50 @@ class FFmpegSink:
         for line in self.p.stderr:
             self.log('ffmpeg: ' + line.decode(errors='replace').strip())
 
-    def push(self, bgr):
-        if not self.alive:
-            return
-        try:
-            self.q.put_nowait(bgr.tobytes())
-        except queue.Full:
-            pass
-
     def close(self, wait=True):
-        self.alive = False                          # writer thread exits and closes ffmpeg's stdin -> clean EOF
-        if wait:
-            try:
-                self.p.wait(5)
-            except subprocess.TimeoutExpired:
-                self.p.kill()
+        if not wait:
+            self.alive = False
+            return
+        self._stop()                                # writer drains the queue and closes ffmpeg's stdin -> clean EOF
+        try:
+            self.p.wait(5)
+        except subprocess.TimeoutExpired:
+            self.p.kill()
+
+
+class CvSink(_ThreadedSink):
+    """Fallback without ffmpeg: OpenCV's VideoWriter, MPEG-4 Part 2 ('mp4v') in an .mp4 file."""
+
+    def __init__(self, path, size, fps):
+        import cv2
+        self.w = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*'mp4v'), fps, tuple(size))
+        if not self.w.isOpened():
+            raise RuntimeError(f'OpenCV could not open a video writer for {path}')
+        self._start()
+
+    def _prepare(self, bgr):
+        return bgr.copy()
+
+    def _write(self, f):
+        self.w.write(f)
+
+    def _finish(self):
+        self.w.release()
+
+    def close(self):
+        self._stop()
 
 
 class Recorder:
     def __init__(self, path, size, fps, log=print):
         self.path, self.size = path, size
-        self.sink = FFmpegSink(['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p',
-                                '-movflags', '+faststart', '-y', path], size, fps, log)
+        if find_ffmpeg():
+            self.backend = 'ffmpeg H.264'
+            self.sink = FFmpegSink(['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p',
+                                    '-movflags', '+faststart', '-y', path], size, fps, log)
+        else:
+            self.backend = 'OpenCV MPEG-4'
+            self.sink = CvSink(path, size, fps)
 
     def push(self, bgr):
         self.sink.push(bgr)

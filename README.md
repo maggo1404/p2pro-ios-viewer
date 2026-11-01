@@ -35,7 +35,10 @@ python viewer.py           # minimal OpenCV-only viewer
   Thermal Master before starting.
 * **Unplug and replug the camera before every start.** After a session ends, the camera didn't
   answer a new handshake in our tests until it was power-cycled.
-* Recording and RTSP need **ffmpeg** on PATH. RTSP also needs MediaMTX: `python tools/get_mediamtx.py`.
+* Recording and RTSP use **ffmpeg**. The Windows exe contains it (taken from the `imageio-ffmpeg`
+  package at build time); from source it's found on PATH or via `imageio-ffmpeg` (in `requirements.txt`). Without any ffmpeg, recording falls back to OpenCV
+  (MPEG-4 Part 2 instead of H.264, larger files) and RTSP is disabled. RTSP also needs MediaMTX:
+  `python tools/get_mediamtx.py`.
 
 ### App features (`app.py`)
 * **Measurement**: click = temperature cursor, drag = rectangle (max / min / average, hottest and

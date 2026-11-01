@@ -12,6 +12,14 @@ else:
 
 datas += collect_data_files('libusb_package')
 binaries += collect_dynamic_libs('libusb_package')
+# ffmpeg for MP4 recording / RTSP: the binary shipped with the imageio-ffmpeg pip package, placed in bin/
+# (streaming.find_ffmpeg looks there). Fail the build rather than ship an exe without it.
+import imageio_ffmpeg
+FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
+if not os.path.isfile(FFMPEG):
+    raise SystemExit(f'ffmpeg not found ({FFMPEG}); pip install imageio-ffmpeg')
+print('bundling ffmpeg:', FFMPEG)
+binaries.append((FFMPEG, 'bin'))
 
 a = Analysis(
     ['app.py'],
