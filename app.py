@@ -14,14 +14,18 @@ import time
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QPointF, QRect, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QFont, QImage, QKeySequence, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
-                               QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox,
-                               QProgressDialog, QPushButton, QRadioButton, QScrollArea, QSlider, QSpinBox, QVBoxLayout, QWidget)
+from html import escape
+
+from PySide6.QtCore import QByteArray, QEvent, QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QColor, QFont, QImage, QKeySequence, QPainter, QPen
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame,
+                               QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox, QProgressDialog,
+                               QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter, QToolBar, QVBoxLayout,
+                               QWidget)
 
 import driver
 import exporting
+import ui
 from camera import IMG_H, IMG_W, Camera, CameraError
 from processing import DEFAULT_CALIB, PALETTES, Processor, orient_point, unorient_point
 from streaming import Recorder, RtspServer, find_ffmpeg
@@ -30,6 +34,7 @@ from paths import APP_DIR
 SETTINGS_FILE = os.path.join(APP_DIR, 'settings.json')
 S = 3                                   # output scale: 256x196 -> 768x588 (196x256 when rotated)
 BAR_W = 72                              # colour bar area on the right of the output image
+CANVAS = (30, 30, 30)                   # neutral surround of the image, dark in both appearances (it is part of the picture)
 FPS = 25
 
 
@@ -61,7 +66,10 @@ _FONTS = {}
 def outlined_text(p, x, y, s, color=QColor(255, 255, 255), size=11, bold=True):
     key = (size, bold)
     if key not in _FONTS:
-        _FONTS[key] = QFont('Segoe UI', size, QFont.Bold if bold else QFont.Normal)
+        font = QFont(QApplication.font())   # the system UI font of the platform
+        font.setPointSize(size)
+        font.setWeight(QFont.Bold if bold else QFont.Normal)
+        _FONTS[key] = font
     p.setFont(_FONTS[key])
     p.setPen(QColor(0, 0, 0))
     for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1)):
@@ -92,7 +100,9 @@ class ImageView(QWidget):
         self.setMinimumSize(420, 320)
         self.setMouseTracking(True)
         self.setCursor(Qt.CrossCursor)
-        self.message = 'Connecting...'
+        self.message = 'Connecting…'
+        self.setAccessibleName('Thermal image')
+        self.setAccessibleDescription('Click to add a temperature cursor, drag to draw a rectangle, right-click to delete.')
         self.sensor_w, self.sensor_h = IMG_W, IMG_H   # size of the displayed (possibly rotated) image
 
     def set_image(self, qimg):
@@ -101,10 +111,12 @@ class ImageView(QWidget):
 
     def paintEvent(self, _):
         p = QPainter(self)
-        p.fillRect(self.rect(), QColor(24, 24, 24))
+        p.fillRect(self.rect(), QColor(*CANVAS))
         if self.img is None:
             p.setPen(QColor(200, 200, 200))
-            p.setFont(QFont('Segoe UI', 12))
+            font = QFont(self.font())
+            font.setPointSize(12)
+            p.setFont(font)
             p.drawText(self.rect(), Qt.AlignCenter | Qt.TextWordWrap, self.message)
             return
         iw, ih = self.img.width(), self.img.height()
@@ -156,6 +168,7 @@ class ImageView(QWidget):
 
 # =====================================================================================
 class MainWindow(QMainWindow):
+    theme_key = None
     log_signal = Signal(str)
     drv_status = Signal(str)
     drv_progress = Signal(int, int)
@@ -163,7 +176,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('P2 Pro thermal (Lightning)')
+        self.setWindowTitle('P2 Pro Thermal (Lightning)')
         self.proc = Processor()
         self.cam = None
         self.connecting = False
@@ -183,33 +196,52 @@ class MainWindow(QMainWindow):
         self.drv_cancel = threading.Event()
         self.drv_dialog = None
         self.drv_offered = False
+        self.drv_missing = False
         self.drv_connect_after = True
+        self.conn_text, self.conn_tip = 'Not Connected', ''
 
         self.view = ImageView()
         self.view.clicked.connect(self.on_click)
         self.view.rect_drawn.connect(lambda *r: self.rects.append(r))
         self.view.right_clicked.connect(self.on_right_click)
 
+        self.build_actions()
         panel = self.build_panel()
-        scroll = QScrollArea()
-        scroll.setWidget(panel)
-        scroll.setWidgetResizable(True)
-        scroll.setFixedWidth(330)
-        central = QWidget()
-        lay = QHBoxLayout(central)
-        lay.setContentsMargins(4, 4, 4, 4)
+        self.scroll = QScrollArea()
+        self.scroll.setWidget(panel)
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        margins = panel.layout().contentsMargins()      # collapsed sections count too: they must fit once opened
+        content_w = max(s.body.layout().minimumSize().width() for s in self.sections.values())
+        self.scroll.setMinimumWidth(max(panel.minimumSizeHint().width(), content_w + margins.left() + margins.right())
+                                    + self.scroll.verticalScrollBar().sizeHint().width())
+        self.act_inspector.toggled.connect(self.scroll.setVisible)
+        content = QWidget()                 # image column: optional notice + image
+        lay = QVBoxLayout(content)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.addWidget(self.build_banner())
         lay.addWidget(self.view, 1)
-        lay.addWidget(scroll)
-        self.setCentralWidget(central)
+        self.split = QSplitter()
+        self.split.addWidget(content)
+        self.split.addWidget(self.scroll)
+        self.split.setStretchFactor(0, 1)
+        self.split.setStretchFactor(1, 0)
+        self.split.setCollapsible(0, False)
+        self.split.setCollapsible(1, False)
+        self.setCentralWidget(self.split)
         self.status = QLabel()
         self.statusBar().addWidget(self.status, 1)
         self.log_signal.connect(self.on_log)
         self.drv_status.connect(self.on_drv_status)
         self.drv_progress.connect(self.on_drv_progress)
         self.drv_done.connect(self.on_drv_done)
-        self.add_shortcuts()
+        self.resize(1200, 760)
+        self.split.setSizes([860, 340])
         self.load_settings()
-        self.resize(1200, 700)
+        self.apply_theme()
+        self.update_actions()
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
@@ -219,109 +251,196 @@ class MainWindow(QMainWindow):
         else:
             QTimer.singleShot(200, self.connect_camera)
 
+    # ------------------------------------------------------------------ commands
+    def build_actions(self):
+        """Every command is in the menu bar; the frequent ones are also in the toolbar."""
+        def action(text, fn, key=None, short=None, tip=None):
+            a = QAction(text, self)
+            a.triggered.connect(lambda _checked=False: fn())
+            if key:
+                a.setShortcut(QKeySequence(key))
+            if short:
+                a.setIconText(short)
+            if tip:
+                a.setToolTip(tip)
+            return a
+
+        self.act_snapshot = action('Snapshot', self.snapshot, 'S', tip='Quick save (S): screenshot + per-pixel temperature '
+                                   'data, auto-named in the snapshots folder, in the formats chosen under Output')
+        self.act_export = action('Export…', self.export_dialog, 'Ctrl+E')
+        self.act_rec = action('Start Recording', self.toggle_record, short='Record')
+        self.act_rtsp = action('Start Stream', self.toggle_rtsp, short='Stream', tip='Start the RTSP stream')
+        quit_ = action('Quit', self.close, 'Ctrl+Q')
+        quit_.setMenuRole(QAction.QuitRole)
+        if not find_ffmpeg():             # recording falls back to OpenCV; RTSP needs ffmpeg
+            self.act_rtsp.setEnabled(False)
+            self.act_rtsp.setToolTip('ffmpeg not found')
+            self.act_rec.setToolTip('ffmpeg not found: recording uses OpenCV (MPEG-4, larger files)')
+        m = self.menuBar().addMenu('&File')
+        m.addActions([self.act_snapshot, self.act_export])
+        m.addSeparator()
+        m.addActions([self.act_rec, self.act_rtsp])
+        m.addSeparator()
+        m.addAction(quit_)
+
+        self.act_inspector = QAction('Show Inspector', self, checkable=True, checked=True)
+        self.act_inspector.setIconText('Inspector')
+        self.act_inspector.setShortcut(QKeySequence('Ctrl+I'))
+        self.act_inspector.setToolTip('Show or hide the settings panel (Ctrl+I)')
+        act_full = action('Full Screen', lambda: self.setWindowState(self.windowState() ^ Qt.WindowFullScreen),
+                          QKeySequence(QKeySequence.FullScreen).toString())
+        m = self.menuBar().addMenu('&View')
+        m.addAction(self.act_inspector)
+        m.addAction(act_full)
+        m.addSeparator()
+        m.addAction(action('Rotate 90° Clockwise', self.rotate, 'R'))
+        m.addAction(action('Switch Auto / Fixed Scale',
+                           lambda: (self.rb_fixed if self.rb_auto.isChecked() else self.rb_auto).setChecked(True), 'A'))
+
+        self.act_connect = action('Connect', self.connect_camera, tip='Unplug the camera and plug it back in, then connect')
+        self.act_shutter = action('Shutter Calibration', self.shutter, 'C', short='Shutter',
+                                  tip='Flat-field shutter calibration (C)')
+        self.act_cal = action('Calibrate Temperature…', self.start_calibration)
+        self.act_cal_cancel = action('Cancel Calibration', self.cancel_calibration, 'Escape')
+        self.act_cal_cancel.setEnabled(False)
+        self.act_driver = action('Install Camera Driver…', self.offer_driver_install,
+                                 tip='Download the camera driver from thermalmaster.com and install it (needs admin rights)')
+        self.act_driver.setVisible(driver.is_windows())
+        m = self.menuBar().addMenu('&Camera')
+        m.addActions([self.act_connect, self.act_shutter])
+        m.addSeparator()
+        m.addActions([self.act_cal, self.act_cal_cancel, action('Reset Calibration', self.reset_calibration)])
+        m.addSeparator()
+        m.addAction(self.act_driver)
+
+        m = self.menuBar().addMenu('&Measure')
+        m.addAction(action('Clear Cursors', lambda: self.points.clear()))
+        m.addAction(action('Clear Rectangles', lambda: self.rects.clear()))
+        m.addAction(action('Clear All', self.clear_all, 'Delete'))
+
+        tb = QToolBar('Main')
+        tb.setObjectName('main_toolbar')
+        tb.setMovable(False)
+        tb.setFloatable(False)
+        tb.setIconSize(QSize(18, 18))
+        tb.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        tb.addActions([self.act_connect, self.act_shutter])
+        tb.addSeparator()
+        tb.addActions([self.act_snapshot, self.act_rec, self.act_rtsp])
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        tb.addWidget(spacer)
+        self.chip = QLabel()                # connection + recording state: stays visible with the panel hidden
+        self.chip.setContentsMargins(0, 0, 12, 0)
+        tb.addWidget(self.chip)
+        tb.addAction(self.act_inspector)
+        self.addToolBar(tb)
+        self.setContextMenuPolicy(Qt.NoContextMenu)
+        self.setUnifiedTitleAndToolBarOnMac(True)
+
+    def build_banner(self):
+        """Non-modal notice above the image; replaces the alert that used to appear on launch."""
+        self.banner = QFrame()
+        self.banner.setObjectName('banner')
+        h = QHBoxLayout(self.banner)
+        h.setContentsMargins(12, 6, 8, 6)
+        h.addWidget(QLabel('The camera driver doesn’t seem to be installed.'), 1)
+        b = QPushButton('Install Driver…')
+        b.clicked.connect(self.offer_driver_install)
+        h.addWidget(b)
+        b = QPushButton('Not Now')
+        b.clicked.connect(self.banner.hide)
+        h.addWidget(b)
+        self.banner.hide()
+        return self.banner
+
+    def apply_theme(self):
+        pal = QApplication.palette()
+        self.theme_key = ui.scheme_key(pal)
+        self.setStyleSheet(ui.stylesheet(pal))
+        for a, name in ((self.act_connect, 'connect'), (self.act_shutter, 'shutter'), (self.act_snapshot, 'snapshot'),
+                        (self.act_rtsp, 'stream'), (self.act_inspector, 'inspector')):
+            a.setIcon(ui.icon(name, pal))
+        self.update_status()
+
+    def changeEvent(self, e):
+        # the system appearance can change while the app is running
+        if (self.theme_key is not None and e.type() in (QEvent.ApplicationPaletteChange, QEvent.PaletteChange)
+                and ui.scheme_key(QApplication.palette()) != self.theme_key):
+            self.apply_theme()
+        super().changeEvent(e)
+
     # ------------------------------------------------------------------ panel
     def build_panel(self):
         w = QWidget()
         v = QVBoxLayout(w)
-        v.setSpacing(8)
+        v.setContentsMargins(10, 6, 10, 10)
+        v.setSpacing(6)
+        self.sections = {}
 
-        # --- camera
-        g = QGroupBox('Camera')
-        f = QVBoxLayout(g)
-        self.cam_label = QLabel('not connected')
-        self.cam_label.setWordWrap(True)
-        self.btn_connect = QPushButton('Connect (replug camera first)')
-        self.btn_connect.clicked.connect(self.connect_camera)
-        self.btn_shutter = QPushButton('Shutter calibration (flat field)')
-        self.btn_shutter.clicked.connect(self.shutter)
-        row = QHBoxLayout()
-        row.addWidget(QLabel('Auto shutter every'))
-        self.sp_autoshutter = QSpinBox()
-        self.sp_autoshutter.setRange(0, 600)
-        self.sp_autoshutter.setValue(60)
-        self.sp_autoshutter.setSuffix(' s')
-        self.sp_autoshutter.setSpecialValueText('off')
-        row.addWidget(self.sp_autoshutter)
-        f.addWidget(self.cam_label)
-        f.addWidget(self.btn_connect)
-        f.addWidget(self.btn_shutter)
-        f.addLayout(row)
-        self.btn_driver = QPushButton('Install driver...')
-        self.btn_driver.setToolTip('Download the camera driver from thermalmaster.com and install it (needs admin rights)')
-        self.btn_driver.clicked.connect(lambda: self.offer_driver_install(manual=True))
-        f.addWidget(self.btn_driver)
-        v.addWidget(g)
+        def section(key, title, expanded, layout_cls=QFormLayout):
+            s = ui.Section(title, expanded)
+            if self.sections:
+                line = QFrame()
+                line.setFrameShape(QFrame.HLine)
+                line.setProperty('role', 'separator')
+                v.addWidget(line)
+            self.sections[key] = s
+            v.addWidget(s)
+            return layout_cls(s.body)
+
+        def note(text):
+            lab = QLabel(text)
+            lab.setWordWrap(True)
+            lab.setProperty('role', 'secondary')
+            return lab
 
         # --- measurement
-        g = QGroupBox('Measurement')
-        f = QVBoxLayout(g)
-        hint = QLabel('Click image: cursor · drag: rectangle · right click: delete')
-        hint.setWordWrap(True)
-        hint.setStyleSheet('color: gray')
-        f.addWidget(hint)
-        row = QHBoxLayout()
-        for text, fn in (('Clear cursors', lambda: self.points.clear()), ('Clear rects', lambda: self.rects.clear()),
-                         ('Clear all', self.clear_all)):
-            b = QPushButton(text)
-            b.clicked.connect(fn)
-            row.addWidget(b)
-        f.addLayout(row)
-        self.cb_hotcold = QCheckBox('Mark hottest / coldest spot')
+        f = section('measurement', 'Measurement', True)
+        f.addRow(note('Click the image to add a cursor, drag to draw a rectangle, right-click to delete.'))
+        self.cb_hotcold = QCheckBox('Mark hottest and coldest spots')
         self.cb_hotcold.setChecked(True)
         self.cb_center = QCheckBox('Center crosshair')
-        self.cb_fahrenheit = QCheckBox('Fahrenheit')
-        for cb in (self.cb_hotcold, self.cb_center, self.cb_fahrenheit):
-            f.addWidget(cb)
+        f.addRow(self.cb_hotcold)
+        f.addRow(self.cb_center)
+        seg, (_celsius, self.cb_fahrenheit) = ui.segmented('°C', '°F')
         self.cb_fahrenheit.toggled.connect(self.units_changed)
-        row = QHBoxLayout()
-        self.btn_cal = QPushButton('Calibrate temp...')
-        self.btn_cal.setToolTip('Click a spot whose real temperature you know, then enter it.\n'
-                                'One point fixes the offset, two points (different temperatures) also fix the gain.')
-        self.btn_cal.clicked.connect(self.start_calibration)
-        b = QPushButton('Reset calibration')
-        b.clicked.connect(self.reset_calibration)
-        row.addWidget(self.btn_cal)
-        row.addWidget(b)
-        f.addLayout(row)
-        self.cal_label = QLabel()
-        self.cal_label.setWordWrap(True)
-        self.cal_label.setStyleSheet('color: gray')
-        f.addWidget(self.cal_label)
-        v.addWidget(g)
+        f.addRow('Unit', seg)
+        b = QPushButton('Clear All')
+        b.setToolTip('Remove every cursor and rectangle (Del)')
+        b.clicked.connect(self.clear_all)
+        f.addRow(b)
 
         # --- display
-        g = QGroupBox('Display')
-        f = QFormLayout(g)
+        f = section('display', 'Display', True)
         self.cmb_palette = QComboBox()
         self.cmb_palette.addItems(list(PALETTES))
         self.cmb_palette.currentTextChanged.connect(lambda t: setattr(self.proc, 'palette', t))
         f.addRow('Palette', self.cmb_palette)
         row = QHBoxLayout()
-        self.rb_auto = QRadioButton('Auto')
-        self.rb_fixed = QRadioButton('Fixed')
-        self.rb_auto.setChecked(True)
-        grp = QButtonGroup(g)
-        grp.addButton(self.rb_auto)
-        grp.addButton(self.rb_fixed)
-        row.addWidget(self.rb_auto)
-        row.addWidget(self.rb_fixed)
-        b = QPushButton('Lock current')
+        seg, (self.rb_auto, self.rb_fixed) = ui.segmented('Auto', 'Fixed')
+        row.addWidget(seg, 1)
+        b = QPushButton('Lock Current')
         b.setToolTip('Switch to fixed scale using the current auto range')
         b.clicked.connect(self.lock_range)
         row.addWidget(b)
         f.addRow('Scale', row)
         self.sp_min, self.sp_max = QDoubleSpinBox(), QDoubleSpinBox()
-        for sp, val in ((self.sp_min, 20), (self.sp_max, 35)):
+        for sp, val, name in ((self.sp_min, 20, 'Range minimum'), (self.sp_max, 35, 'Range maximum')):
             sp.setRange(-100, 1000)
             sp.setDecimals(1)
             sp.setSingleStep(0.5)
             sp.setValue(val)
+            sp.setAccessibleName(name)
+            sp.setEnabled(False)                # auto scale drives these; editable when the scale is fixed
+            self.rb_fixed.toggled.connect(sp.setEnabled)
         row = QHBoxLayout()
         row.addWidget(self.sp_min)
         row.addWidget(QLabel('to'))
         row.addWidget(self.sp_max)
         f.addRow('Range', row)
-        self.cb_smooth_range = QCheckBox('smooth auto range (less flicker)')
+        self.cb_smooth_range = QCheckBox('Smooth auto range')
+        self.cb_smooth_range.setToolTip('Less flicker: the auto range follows the scene gradually')
         self.cb_smooth_range.setChecked(True)
         f.addRow('', self.cb_smooth_range)
         self.cmb_contrast = QComboBox()
@@ -335,11 +454,13 @@ class MainWindow(QMainWindow):
         f.addRow('Upscaling', self.cmb_upscale)
         self.cmb_rotation = QComboBox()
         self.cmb_rotation.addItems(['0°', '90°', '180°', '270°'])
-        self.cmb_rotation.setToolTip('Rotate the image clockwise (shortcut R = next step)')
+        self.cmb_rotation.setToolTip('Rotate the image clockwise (R = next step)')
         self.cmb_rotation.currentIndexChanged.connect(lambda _i: self.orientation_widgets_changed())
         f.addRow('Rotation', self.cmb_rotation)
         row = QHBoxLayout()
-        self.cb_flip_h, self.cb_flip_v = QCheckBox('Mirror horizontal'), QCheckBox('Mirror vertical')
+        self.cb_flip_h, self.cb_flip_v = QCheckBox('Horizontal'), QCheckBox('Vertical')
+        self.cb_flip_h.setAccessibleName('Mirror horizontal')
+        self.cb_flip_v.setAccessibleName('Mirror vertical')
         self.cb_flip_h.setToolTip('Mirror left/right on screen (applied after rotation)')
         self.cb_flip_v.setToolTip('Mirror top/bottom on screen (applied after rotation)')
         self.cb_flip_h.toggled.connect(lambda _b: self.orientation_widgets_changed())
@@ -347,16 +468,11 @@ class MainWindow(QMainWindow):
         row.addWidget(self.cb_flip_h)
         row.addWidget(self.cb_flip_v)
         f.addRow('Mirror', row)
-        v.addWidget(g)
 
         # --- enhancement
-        g = QGroupBox('Image enhancement')
-        f = QFormLayout(g)
-        note = QLabel('Denoise/stripe/bad-pixel also clean the temperature readings; '
-                      'the others only change the picture.')
-        note.setWordWrap(True)
-        note.setStyleSheet('color: gray')
-        f.addRow(note)
+        f = section('enhancement', 'Image Enhancement', False)
+        f.addRow(note('Denoise, stripe removal and bad pixel repair also clean the temperature readings; '
+                      'the others only change the picture.'))
         self.enh = {}
 
         def enh_row(key, label, attr_on, attr_val=None, lo=0, hi=1, tip=''):
@@ -367,8 +483,11 @@ class MainWindow(QMainWindow):
             if attr_val:
                 sl = QSlider(Qt.Horizontal)
                 sl.setRange(0, 100)
-                sl.setToolTip('strength')
+                sl.setMinimumWidth(70)
+                sl.setToolTip('Strength')
+                sl.setAccessibleName(label + ' strength')
                 sl.valueChanged.connect(lambda x: setattr(self.proc, attr_val, lo + (hi - lo) * x / 100))
+                cb.toggled.connect(sl.setEnabled)
             f.addRow(cb, sl) if sl else f.addRow(cb)
             self.enh[key] = (cb, sl, attr_on, attr_val, lo, hi)
         enh_row('bad', 'Bad pixel repair', 'bad_pixels', tip='Replace stuck/blinking pixels with their neighbours')
@@ -376,69 +495,66 @@ class MainWindow(QMainWindow):
                 'Remove row/column fixed-pattern noise (vertical/horizontal lines)')
         enh_row('denoise', 'Temporal denoise', 'denoise', 'denoise_strength', 0, 0.95,
                 'Average over time where the scene is still (motion adaptive)')
-        enh_row('dde', 'Detail enhancement (DDE)', 'dde', 'dde_strength', 1, 5,
-                'Digital detail enhancement: boost fine detail while compressing the big temperature range')
+        enh_row('dde', 'Detail enhancement', 'dde', 'dde_strength', 1, 5,
+                'Digital detail enhancement (DDE): boost fine detail while compressing the big temperature range')
         enh_row('sharpen', 'Sharpen', 'sharpen', 'sharpen_strength', 0, 2, 'Unsharp mask after upscaling')
-        v.addWidget(g)
+
+        # --- calibration
+        f = section('calibration', 'Calibration', False)
+        self.sp_autoshutter = QSpinBox()
+        self.sp_autoshutter.setRange(0, 600)
+        self.sp_autoshutter.setValue(60)
+        self.sp_autoshutter.setSuffix(' s')
+        self.sp_autoshutter.setSpecialValueText('Off')
+        self.sp_autoshutter.setToolTip('Run the flat-field shutter calibration automatically at this interval')
+        f.addRow('Auto Shutter', self.sp_autoshutter)
+        row = QHBoxLayout()
+        self.btn_cal = QPushButton('Calibrate…')
+        self.btn_cal.setToolTip('Click a spot whose real temperature you know, then enter it.\n'
+                                'One point fixes the offset, two points (different temperatures) also fix the gain.')
+        self.btn_cal.clicked.connect(self.start_calibration)
+        b = QPushButton('Reset')
+        b.setToolTip('Back to the default calibration')
+        b.clicked.connect(self.reset_calibration)
+        row.addWidget(self.btn_cal)
+        row.addWidget(b)
+        f.addRow(row)
+        self.cal_label = note('')
+        f.addRow(self.cal_label)
 
         # --- output
-        g = QGroupBox('Output')
-        f = QVBoxLayout(g)
-        row = QHBoxLayout()
-        b = QPushButton('Snapshot')
-        b.setToolTip('Quick save (S): screenshot + per-pixel temperature data, auto-named in the snapshots folder, '
-                     'in the formats chosen below')
-        b.clicked.connect(self.snapshot)
-        b_exp = QPushButton('Export…')
-        b_exp.setToolTip('Choose the file name and folder; the temperature data is saved next to the image '
-                         'with the same name')
-        b_exp.clicked.connect(self.export_dialog)
-        self.btn_rec = QPushButton('Start recording')
-        self.btn_rec.clicked.connect(self.toggle_record)
-        row.addWidget(b)
-        row.addWidget(b_exp)
-        f.addLayout(row)
-        f.addWidget(self.btn_rec)
-        row = QHBoxLayout()
+        f = section('output', 'Output', False)
         self.cmb_snap_image = QComboBox()
         self.cmb_snap_image.addItems([n for n, _ in exporting.IMAGE_FORMATS])
         self.cmb_snap_image.setToolTip('Screenshot format (includes overlays and colour bar)')
+        f.addRow('Image', self.cmb_snap_image)
         self.cmb_snap_data = QComboBox()
         self.cmb_snap_data.addItems([n for n, _ in exporting.DATA_FORMATS])
         self.cmb_snap_data.setToolTip('Per-pixel temperatures (in the selected unit, same pixel grid as the '
                                       'unscaled image): CSV / XML text, or float32 TIFF for ImageJ / Python')
-        row.addWidget(QLabel('Image'))
-        row.addWidget(self.cmb_snap_image)
-        row.addWidget(QLabel('Data'))
-        row.addWidget(self.cmb_snap_data)
-        f.addLayout(row)
-        self.btn_rtsp = QPushButton('Start RTSP stream')
-        self.btn_rtsp.clicked.connect(self.toggle_rtsp)
-        f.addWidget(self.btn_rtsp)
+        f.addRow('Data', self.cmb_snap_data)
+        self.btn_export = QPushButton('Export…')
+        self.btn_export.setToolTip('Choose the file name and folder; the temperature data is saved next to the image '
+                                   'with the same name (Ctrl+E)')
+        self.btn_export.clicked.connect(self.export_dialog)
+        f.addRow(self.btn_export)
+        self.cb_overlay_out = QCheckBox('Record and stream overlays')
+        self.cb_overlay_out.setToolTip('Include cursors and labels in the recording and the stream')
+        self.cb_overlay_out.setChecked(True)
+        f.addRow(self.cb_overlay_out)
         self.rtsp_url = QLineEdit()
         self.rtsp_url.setReadOnly(True)
-        self.rtsp_url.setPlaceholderText('stream URL appears here')
-        f.addWidget(self.rtsp_url)
-        self.cb_overlay_out = QCheckBox('Include cursors / labels in recording and stream')
-        self.cb_overlay_out.setChecked(True)
-        f.addWidget(self.cb_overlay_out)
-        if not find_ffmpeg():             # recording falls back to OpenCV; RTSP needs ffmpeg
-            self.btn_rtsp.setEnabled(False)
-            self.btn_rtsp.setToolTip('ffmpeg not found')
-            self.btn_rec.setToolTip('ffmpeg not found: recording uses OpenCV (MPEG-4, larger files)')
-        v.addWidget(g)
+        self.rtsp_url.setAccessibleName('Stream URL')
+        self.rtsp_url.hide()                # only relevant while streaming
+        self.rtsp_row_label = QLabel('Stream URL')
+        self.rtsp_row_label.hide()
+        f.addRow(self.rtsp_row_label, self.rtsp_url)
+        for lay in (s.body.layout() for s in self.sections.values()):
+            lay.setRowWrapPolicy(QFormLayout.DontWrapRows)
+            lay.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         v.addStretch(1)
         self.update_cal_label()
         return w
-
-    def add_shortcuts(self):
-        for key, fn in (('Delete', self.clear_all), ('S', self.snapshot), ('C', self.shutter), ('R', self.rotate),
-                        ('A', lambda: (self.rb_fixed if self.rb_auto.isChecked() else self.rb_auto).setChecked(True)),
-                        ('Escape', self.cancel_calibration)):
-            a = QAction(self)
-            a.setShortcut(QKeySequence(key))
-            a.triggered.connect(fn)
-            self.addAction(a)
 
     # ------------------------------------------------------------------ driver
     def check_driver(self, connect=True):
@@ -449,26 +565,24 @@ class MainWindow(QMainWindow):
             self.log_signal.emit('@driver ' + ('missing' if ok is False else 'ok'))
         threading.Thread(target=work, daemon=True).start()
 
-    def offer_driver_install(self, manual=False):
+    def offer_driver_install(self):
         if self.drv_busy:
             return
-        if not driver.is_windows():
-            QMessageBox.information(self, 'Install driver', 'The driver is only needed (and can only be installed) on Windows.')
+        box = QMessageBox(QMessageBox.Question, 'Install Camera Driver',
+                          'Download and install the camera driver?', QMessageBox.Cancel, self)
+        box.setInformativeText('The driver (libusbK, USB 0BDA:5840) comes from thermalmaster.com, in the '
+                               '"Temp Master (P-Serie)" package, about 55 MB. Windows will ask for administrator permission.')
+        install = box.addButton('Install', QMessageBox.AcceptRole)
+        box.setDefaultButton(install)
+        box.exec()
+        if box.clickedButton() != install:
             return
-        text = ('The camera driver (libusbK, USB 0BDA:5840) does not seem to be installed.\n\n'
-                'It can be downloaded from thermalmaster.com (the "Temp Master (P-Serie)" package, ~55 MB) and '
-                'installed now. Windows will ask for administrator permission.\n\nInstall the driver?')
-        if manual:
-            text = ('Download the camera driver from thermalmaster.com (the "Temp Master (P-Serie)" package, ~55 MB) '
-                    'and install it? Windows will ask for administrator permission.')
-        if QMessageBox.question(self, 'Camera driver', text, QMessageBox.Yes | QMessageBox.No,
-                                QMessageBox.Yes) != QMessageBox.Yes:
-            return
+        self.banner.hide()
         self.drv_busy = True
-        self.btn_driver.setEnabled(False)
+        self.act_driver.setEnabled(False)
         self.drv_cancel.clear()
-        dlg = QProgressDialog('Starting...', 'Cancel', 0, 0, self)
-        dlg.setWindowTitle('Installing camera driver')
+        dlg = QProgressDialog('Starting…', 'Cancel', 0, 0, self)
+        dlg.setWindowTitle('Installing Camera Driver')
         dlg.setWindowModality(Qt.WindowModal)
         dlg.setMinimumDuration(0)
         dlg.setAutoClose(False)
@@ -500,19 +614,22 @@ class MainWindow(QMainWindow):
         if self.drv_dialog and total:
             self.drv_dialog.setRange(0, total)
             self.drv_dialog.setValue(min(done, total))
-            self.drv_dialog.setLabelText(f'Downloading... {done / 1e6:.1f} / {total / 1e6:.1f} MB')
+            self.drv_dialog.setLabelText(f'Downloading… {done / 1e6:.1f} of {total / 1e6:.1f} MB')
 
     def on_drv_done(self, ok, msg):
         self.drv_busy = False
-        self.btn_driver.setEnabled(True)
+        self.act_driver.setEnabled(True)
         if self.drv_dialog:
             self.drv_dialog.canceled.disconnect()           # close() would emit canceled()
             self.drv_dialog.close()
             self.drv_dialog = None
         if ok:
-            QMessageBox.information(self, 'Camera driver', msg)
-        elif msg:
-            QMessageBox.warning(self, 'Camera driver', 'The driver could not be installed.\n\n' + msg)
+            self.drv_missing = False
+            QMessageBox.information(self, 'Camera Driver', msg)
+        else:
+            self.banner.setVisible(self.drv_missing)
+            if msg:
+                QMessageBox.warning(self, 'Camera Driver', 'The driver could not be installed.\n\n' + msg)
 
     # ------------------------------------------------------------------ camera
     def connect_camera(self):
@@ -522,10 +639,10 @@ class MainWindow(QMainWindow):
             self.cam.close()
             self.cam = None
         self.connecting = True
-        self.btn_connect.setEnabled(False)
-        self.cam_label.setText('connecting... (takes ~6 s)')
+        self.act_connect.setEnabled(False)
+        self.set_connection('Connecting…', 'Takes about 6 seconds')
         self.view.img = None
-        self.view.message = 'Connecting to camera...'
+        self.view.message = 'Connecting to the camera…'
         self.view.update()
 
         def work():
@@ -543,29 +660,43 @@ class MainWindow(QMainWindow):
     def on_log(self, s):
         if s == '@driver missing':
             self.drv_offered = True
-            self.offer_driver_install()
-            if self.drv_connect_after and not self.drv_busy:
-                self.connect_camera()                   # declined: still try, the driver check can be wrong
+            self.drv_missing = True
+            self.banner.show()
+            if self.drv_connect_after:
+                self.connect_camera()                   # still try: the driver check can be wrong
         elif s == '@driver ok':
             if self.drv_connect_after:
                 self.connect_camera()
         elif s == '@connected':
             self.connecting = False
-            self.btn_connect.setEnabled(True)
-            self.cam_label.setText('connected, streaming')
+            self.act_connect.setEnabled(True)
+            self.set_connection('Connected')
             self.last_shutter = time.time()
             self.proc.reset_temporal()
         elif s.startswith('@failed'):
             self.connecting = False
-            self.btn_connect.setEnabled(True)
-            self.cam_label.setText('<b>not connected</b>: ' + s[8:])
-            self.view.message = 'No camera.\n\n' + s[8:] + '\n\nUnplug the camera, plug it back in, then press Connect.'
+            self.act_connect.setEnabled(True)
+            self.set_connection('Not Connected', s[8:])
+            self.statusBar().showMessage('Not connected: ' + s[8:], 8000)
+            self.view.message = 'No camera.\n\n' + s[8:] + '\n\nUnplug the camera, plug it back in, then choose Connect.'
             self.view.update()
             if 'camera not found' in s and driver.is_windows() and not self.drv_offered and not self.drv_busy:
                 self.drv_offered = True
                 self.check_driver(connect=False)
         else:
             print(s)
+
+    def set_connection(self, text, tip=''):
+        self.conn_text, self.conn_tip = text, tip
+        self.update_actions()
+        self.update_status()
+
+    def update_actions(self):
+        """commands that have nothing to act on are disabled instead of silently doing nothing"""
+        has_frame = self.temp is not None
+        self.act_shutter.setEnabled(self.cam is not None)
+        for w_ in (self.act_snapshot, self.act_export, self.act_cal, self.btn_export, self.btn_cal):
+            w_.setEnabled(has_frame)
 
     def shutter(self):
         if not self.cam or self.shutter_busy:
@@ -609,6 +740,7 @@ class MainWindow(QMainWindow):
         now = time.time()
         if now - self.fps_t >= 1:
             self.fps, self.fps_count, self.fps_t = self.fps_count / (now - self.fps_t), 0, now
+            self.update_actions()
             self.update_status()
         iv = self.sp_autoshutter.value()
         if iv and now - self.last_shutter > iv and not self.cal_mode:
@@ -645,7 +777,7 @@ class MainWindow(QMainWindow):
         CANVAS_W, CANVAS_H = OUT_W + BAR_W, OUT_H
         self.view.sensor_w, self.view.sensor_h = w, h
         canvas = np.zeros((CANVAS_H, CANVAS_W, 3), np.uint8)
-        canvas[:, :] = (30, 30, 30)
+        canvas[:, :] = CANVAS
         canvas[:OUT_H, :OUT_W] = self.proc.render(t, lo, hi)
         bar_top, bar_h = 28, OUT_H - 56
         canvas[bar_top:bar_top + bar_h, OUT_W + 8:OUT_W + 26] = self.proc.colorbar(bar_h)
@@ -716,12 +848,21 @@ class MainWindow(QMainWindow):
         return a[:, :q.width() * 3].reshape(q.height(), q.width(), 3).copy()
 
     def update_status(self):
-        parts = [f'{self.fps:.1f} fps', f'processing {self.proc_ms:.0f} ms']
+        self.status.setText(f'{self.fps:.1f} fps   |   processing {self.proc_ms:.0f} ms' if self.cam else '')
+        red = ui.signal(QApplication.palette()).name()
+        chips = [f'<span style="color:{red}">{self.conn_text}</span>' if self.conn_text == 'Not Connected'
+                 else self.conn_text]
+        tips = [self.conn_tip] if self.conn_tip else []
         if self.recorder:
-            parts.append('● REC ' + os.path.basename(self.recorder.path))
+            chips.append(f'<span style="color:{red}">● REC</span>')
+            tips.append('Recording to ' + self.recorder.path)
         if self.rtsp:
-            parts.append('● RTSP ' + self.rtsp.url)
-        self.status.setText('   |   '.join(parts))
+            chips.append(f'<span style="color:{red}">● RTSP</span>')
+            tips.append('Streaming at ' + self.rtsp.url)
+        self.chip.setText('&nbsp;&nbsp;·&nbsp;&nbsp;'.join(chips))
+        self.chip.setToolTip(escape('\n'.join(tips)))
+        pal = QApplication.palette()
+        self.act_rec.setIcon(ui.icon('stop', pal, ui.signal(pal)) if self.recorder else ui.icon('record', pal))
 
     # ------------------------------------------------------------------ mouse
     def on_click(self, sx, sy):
@@ -750,11 +891,13 @@ class MainWindow(QMainWindow):
         if self.temp is None:
             return
         self.cal_mode = True
-        self.btn_cal.setText('Click the image...')
+        self.act_cal_cancel.setEnabled(True)
+        self.btn_cal.setText('Click the Image…')
 
     def cancel_calibration(self):
         self.cal_mode = False
-        self.btn_cal.setText('Calibrate temp...')
+        self.act_cal_cancel.setEnabled(False)
+        self.btn_cal.setText('Calibrate…')
 
     def calibration_point(self, sx, sy):
         self.cancel_calibration()
@@ -787,7 +930,7 @@ class MainWindow(QMainWindow):
 
     def update_cal_label(self):
         c = self.proc.calib
-        state = 'default (approximate, ±few °C)' if c == DEFAULT_CALIB else 'user calibrated'
+        state = 'Default (approximate, ±few °C)' if c == DEFAULT_CALIB else 'User calibrated'
         self.cal_label.setText(f'{state}: gain {c["gain"]:.4f} °C/count, offset {c["offset"]:.2f} °C'
                                + (f', {len(self.cal_points)} point(s) this session' if self.cal_points else ''))
 
@@ -921,14 +1064,16 @@ class MainWindow(QMainWindow):
             self.recorder.close()
             self.statusBar().showMessage('saved ' + self.recorder.path, 8000)
             self.recorder = None
-            self.btn_rec.setText('Start recording')
+            self.act_rec.setText('Start Recording')
+            self.act_rec.setIconText('Record')
         else:
             d = os.path.join(APP_DIR, 'recordings')
             os.makedirs(d, exist_ok=True)
             path = os.path.join(d, time.strftime('thermal_%Y%m%d_%H%M%S.mp4'))
             try:
                 self.recorder = Recorder(path, self.out_size(), FPS, log=print)
-                self.btn_rec.setText('■ Stop recording')
+                self.act_rec.setText('Stop Recording')
+                self.act_rec.setIconText('Stop')
                 self.statusBar().showMessage(f'recording {path} ({self.recorder.backend})', 5000)
             except Exception as e:
                 QMessageBox.warning(self, 'Recording', str(e))
@@ -938,13 +1083,20 @@ class MainWindow(QMainWindow):
         if self.rtsp:
             self.rtsp.close()
             self.rtsp = None
-            self.btn_rtsp.setText('Start RTSP stream')
+            self.act_rtsp.setText('Start Stream')
+            self.act_rtsp.setIconText('Stream')
             self.rtsp_url.clear()
+            self.rtsp_url.hide()
+            self.rtsp_row_label.hide()
         else:
             try:
                 self.rtsp = RtspServer(self.out_size(), FPS, log=print)
-                self.btn_rtsp.setText('■ Stop RTSP stream')
+                self.act_rtsp.setText('Stop Stream')
+                self.act_rtsp.setIconText('Stop')
                 self.rtsp_url.setText(self.rtsp.url)
+                self.rtsp_url.show()
+                self.rtsp_row_label.show()
+                self.sections['output'].set_expanded(True)
                 self.rtsp_url.setToolTip('Open in VLC: Media > Open Network Stream.\n'
                                          'Windows Firewall may ask to allow mediamtx.exe for other devices to connect.')
             except Exception as e:
@@ -962,6 +1114,12 @@ class MainWindow(QMainWindow):
              'snap_image': self.cmb_snap_image.currentText(), 'snap_data': self.cmb_snap_data.currentText(), 'enh': {}}
         for k, (cb, sl, *_rest) in self.enh.items():
             s['enh'][k] = [cb.isChecked(), sl.value() if sl else None]
+        s['sections'] = {k: sec.expanded() for k, sec in self.sections.items()}
+        s['inspector'] = self.act_inspector.isChecked()
+        if self.scroll.isVisible():
+            self.inspector_width = self.scroll.width()
+        s['inspector_width'] = self.inspector_width
+        s['geometry'] = bytes(self.saveGeometry().toBase64()).decode('ascii')
         return s
 
     def load_settings(self):
@@ -976,8 +1134,9 @@ class MainWindow(QMainWindow):
         self.cmb_upscale.setCurrentText(s.get('upscale', 'Bicubic'))
         self.proc.palette, self.proc.contrast, self.proc.upscale = (self.cmb_palette.currentText(),
                                                                     self.cmb_contrast.currentText(), self.cmb_upscale.currentText())
-        self.cb_fahrenheit.blockSignals(True)
-        self.cb_fahrenheit.setChecked(s.get('fahrenheit', False))
+        self.cb_fahrenheit.blockSignals(True)      # the stored range is already in this unit
+        if s.get('fahrenheit', False):             # segments are exclusive: °C starts checked and unchecks itself
+            self.cb_fahrenheit.setChecked(True)
         self.cb_fahrenheit.blockSignals(False)
         (self.rb_fixed if s.get('fixed') else self.rb_auto).setChecked(True)
         self.sp_min.setValue(s.get('min', 20))
@@ -998,6 +1157,16 @@ class MainWindow(QMainWindow):
             if sl is not None:
                 sl.setValue(val if val is not None else 50)
                 setattr(self.proc, attr_val, lo + (hi - lo) * sl.value() / 100)
+                sl.setEnabled(on)
+        for k, on in s.get('sections', {}).items():
+            if k in self.sections:
+                self.sections[k].set_expanded(on)
+        if s.get('geometry'):
+            self.restoreGeometry(QByteArray.fromBase64(s['geometry'].encode('ascii')))
+        self.inspector_width = int(s.get('inspector_width', 340))
+        total = max(sum(self.split.sizes()), self.width())
+        self.split.setSizes([total - self.inspector_width, self.inspector_width])
+        self.act_inspector.setChecked(bool(s.get('inspector', True)))
 
     def closeEvent(self, e):
         try:
