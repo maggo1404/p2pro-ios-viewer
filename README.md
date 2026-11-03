@@ -3,7 +3,11 @@
 A Python app for using the **Thermal Master P2 Pro with the Lightning (iOS) connector on a Windows PC**:
 live image, temperature cursors and boxes, image enhancement, recording and RTSP streaming.
 
-![the app with the camera connected: thermal image with two measurement rectangles, colour scale and side panel](app.png)
+![the app window: menu bar and toolbar at the top, thermal image with a cursor, two measurement rectangles and a colour scale, collapsible settings panel on the right](app.png)
+
+*The interface, rendered on Linux from a frame of the USB capture in `capture/`, not from a live session. The capture
+has no shutter reference, so this image is noisier than a live one and its temperatures are not meaningful. On Windows
+the controls use the native style.*
 
 > [!CAUTION]
 > **This project was completely vibe-coded.** All the code, the reverse engineering and this README
@@ -46,11 +50,16 @@ python viewer.py           # minimal OpenCV-only viewer
   `python tools/get_mediamtx.py`.
 
 ### App features (`app.py`)
+* **Interface**: menu bar with every command and its shortcut; toolbar for Connect, Shutter, Snapshot, Record and
+  Stream, which also shows the connection, recording and stream state; resizable settings panel with collapsible
+  sections that can be hidden for more image space (Ctrl+I); full screen. It follows the system's light or dark
+  appearance and uses neutral colours, so the only saturated colours on screen are the thermal image and the red
+  recording and error signals. Panel layout and window size are remembered (`ui.py`).
 * **Measurement**: click = temperature cursor, drag = rectangle (max / min / average, hottest and
   coldest points marked), right click = delete; *Clear All* button and *Measure* menu; global hottest/coldest markers;
   center crosshair; °C / °F; temperature calibration (see below).
 * **Display**: 9 palettes; auto scale (coldest pixel = bottom of the scale, hottest = top) or fixed
-  range, "Lock current" freezes the current auto range; contrast mapping linear / plateau histogram
+  range, "Lock Current" freezes the current auto range; contrast mapping linear / plateau histogram
   equalization / CLAHE; rotation 0° / 90° / 180° / 270° and mirroring horizontally / vertically (applied
   after the rotation, i.e. on the screen axes; cursors and rectangles move along).
 * **Image enhancement**: bad-pixel repair, stripe (row/column noise) removal, motion-adaptive temporal
@@ -62,12 +71,10 @@ python viewer.py           # minimal OpenCV-only viewer
   JPEG plus the temperature of every pixel as CSV, XML or 32-bit float TIFF (opens in ImageJ/Fiji,
   Python, MATLAB), in °C or °F, in the displayed orientation, with metadata (time, palette, range,
   rotation, calibration); MP4 recording
-  (`recordings/`), **RTSP stream** at `rtsp://<pc-ip>:8554/thermal` (URL shown in the panel).
+  (`recordings/`), **RTSP stream** at `rtsp://<pc-ip>:8554/thermal` (URL shown under *Output* while streaming).
 * Settings are saved in `settings.json`. Keyboard shortcuts: Del = clear all, S = snapshot,
   C = shutter calibration, R = next rotation step, A = auto/fixed scale, Esc = cancel calibration,
   Ctrl+E = export, Ctrl+I = show/hide the side panel. Every command is in the menu bar.
-* **Interface**: follows the system's light or dark appearance and accent colour, with neutral chrome so
-  the only saturated colour on screen is the thermal image (`ui.py`).
 
 **Testing:** the author used `app.py` with the real camera. The RTSP stream was only received by an
 ffmpeg client on the same PC, not from another device.
@@ -188,6 +195,6 @@ Interpretation: shutter close / open. The app uses the frames in between as the 
 | `tools/decode.py`, `tools/dump.py` | rebuild USB transactions from a capture / make `dump.txt` |
 | `tools/get_mediamtx.py` | downloads the MediaMTX RTSP server into `bin/` |
 | `tools/upv_sdk/` | USB Packet Viewer SDK (github.com/UsbPacketViewer/sdk, MIT) |
-| `app.png` | screenshot of the app |
+| `app.png` | screenshot of the app, rendered from a frame of the USB capture |
 | `setup.png` | photo of the sniffing setup |
 | `experiments/` | the probing scripts used before the capture, kept as a record. They expect `iap2.py` in the same folder and weren't updated after being moved here |
