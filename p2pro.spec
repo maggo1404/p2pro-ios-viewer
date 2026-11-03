@@ -26,7 +26,7 @@ a = Analysis(
     pathex=['.'],
     binaries=binaries,
     datas=datas,
-    hiddenimports=['usb.backend.libusb1', 'libusb_package'],
+    hiddenimports=['usb.backend.libusb1', 'libusb_package', 'driver', 'inno', 'lzma', 'winreg'],
     excludes=['tkinter', 'PySide6.QtWebEngineCore', 'PySide6.QtWebEngineWidgets', 'PySide6.QtQml',
               'PySide6.QtQuick', 'PySide6.Qt3DCore', 'PySide6.QtCharts', 'PySide6.QtDataVisualization'],
     noarchive=False,

@@ -21,6 +21,8 @@ jobs:
           cache-dependency-path: requirements.txt
       - name: Install dependencies
         run: pip install -r requirements.txt pyinstaller
+      - name: Unit tests
+        run: python -m unittest discover tests
       - name: Download MediaMTX
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -30,6 +30,11 @@ python app.py              # full app with side panel
 python viewer.py           # minimal OpenCV-only viewer
 ```
 
+* **Driver (Windows):** on start the app checks whether the libusbK driver (`P2Pro.inf`) is installed. If not
+  a notice above the image offers to install it: it looks up "Temp Master (P-Serie)" on thermalmaster.com's download center,
+  downloads that installer (~55 MB, needs internet), unpacks only its `drivers` folder (pure Python, the installer
+  is never run) and installs the driver via `pnputil` with a UAC prompt (admin rights). The menu command
+  *Camera > Install Camera Driver…* does the same on demand. Replug the camera afterwards. Code: `driver.py`, `inno.py`.
 * The camera shows up as `USB\VID_0BDA&PID_5840`. It was tested with the **libusbK** driver, which on
   the test PC had been installed by the Thermal Master PC app (its `drivers/inf/P2Pro.inf`). Close
   Thermal Master before starting.
@@ -42,7 +47,7 @@ python viewer.py           # minimal OpenCV-only viewer
 
 ### App features (`app.py`)
 * **Measurement**: click = temperature cursor, drag = rectangle (max / min / average, hottest and
-  coldest points marked), right click = delete; clear buttons; global hottest/coldest markers;
+  coldest points marked), right click = delete; *Clear All* button and *Measure* menu; global hottest/coldest markers;
   center crosshair; °C / °F; temperature calibration (see below).
 * **Display**: 9 palettes; auto scale (coldest pixel = bottom of the scale, hottest = top) or fixed
   range, "Lock current" freezes the current auto range; contrast mapping linear / plateau histogram
@@ -59,7 +64,10 @@ python viewer.py           # minimal OpenCV-only viewer
   rotation, calibration); MP4 recording
   (`recordings/`), **RTSP stream** at `rtsp://<pc-ip>:8554/thermal` (URL shown in the panel).
 * Settings are saved in `settings.json`. Keyboard shortcuts: Del = clear all, S = snapshot,
-  C = shutter calibration, R = next rotation step, A = auto/fixed scale, Esc = cancel calibration.
+  C = shutter calibration, R = next rotation step, A = auto/fixed scale, Esc = cancel calibration,
+  Ctrl+E = export, Ctrl+I = show/hide the side panel. Every command is in the menu bar.
+* **Interface**: follows the system's light or dark appearance and accent colour, with neutral chrome so
+  the only saturated colour on screen is the thermal image (`ui.py`).
 
 **Testing:** the author used `app.py` with the real camera. The RTSP stream was only received by an
 ffmpeg client on the same PC, not from another device.
@@ -164,6 +172,7 @@ Interpretation: shutter close / open. The app uses the frames in between as the 
 | path | what |
 |---|---|
 | `app.py` | the Qt app (side panel, measurement, enhancement, recording, RTSP) |
+| `ui.py` | system-palette colours, toolbar icons, disclosure sections, segmented controls |
 | `camera.py` | camera driver (handshake, init sequence, frame decoding, shutter) |
 | `processing.py` | temperatures, enhancement pipeline, palettes, super-resolution |
 | `streaming.py` | RTSP (MediaMTX + ffmpeg) and MP4 recording |
