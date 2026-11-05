@@ -2,7 +2,9 @@
 orchestration against a fake api. The SetupAPI calls themselves (winusb.SetupApi) have NOT been run anywhere."""
 import ctypes
 import json
+import inspect
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -521,3 +523,56 @@ class DriverIntegration(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+@unittest.skipUnless(sys.platform == 'win32', 'runs the real SetupAPI layer: Windows only')
+class RealWindows(unittest.TestCase):
+    """The real ctypes layer on a machine without the camera (the CI runner). Read-only: nothing is bound, reverted,
+    installed or written, and nothing needs admin rights."""
+    ENTRY_POINTS = {
+        'sp': ('SetupDiGetClassDevsW', 'SetupDiDestroyDeviceInfoList', 'SetupDiEnumDeviceInfo',
+               'SetupDiGetDeviceRegistryPropertyW', 'SetupDiGetDeviceInstanceIdW', 'SetupDiCreateDeviceInfoList',
+               'SetupDiOpenDeviceInfoW', 'SetupDiGetDeviceInstallParamsW', 'SetupDiSetDeviceInstallParamsW',
+               'SetupDiBuildDriverInfoList', 'SetupDiEnumDriverInfoW', 'SetupDiGetDriverInfoDetailW',
+               'SetupDiSetSelectedDriverW', 'SetupDiCallClassInstaller', 'SetupDiOpenDevRegKey',
+               'SetupDiCreateDevRegKeyW'),
+        'nd': ('DiInstallDevice',),
+        'adv': ('RegSetValueExW', 'RegQueryValueExW', 'RegCloseKey'),
+    }
+
+    def test_every_entry_point_resolves_with_its_types(self):
+        api = winusb.load_api(winusb.Log(os.devnull))
+        for lib, names in self.ENTRY_POINTS.items():
+            for name in names:
+                fn = getattr(getattr(api, lib), name)
+                self.assertIsNotNone(fn.argtypes, name)
+                self.assertGreater(len(fn.argtypes), 0, name)
+                self.assertIsNotNone(fn.restype, name)
+
+    def test_the_declared_functions_are_the_ones_checked(self):
+        declared = set(re.findall(r'd\((?:sp|self\.nd|adv)\.(\w+),', inspect.getsource(winusb.SetupApi._declare)))
+        self.assertEqual(declared, {n for names in self.ENTRY_POINTS.values() for n in names})
+
+    def test_no_camera_means_absent(self):
+        self.assertEqual(winusb.binding_state(), 'absent')
+        self.assertIsNone(winusb.app_guid_present())
+
+    def test_find_camera_finds_nothing_and_does_not_raise(self):
+        api = winusb.load_api(winusb.Log(os.devnull))
+        self.assertIsNone(api.find_camera())
+        self.assertIsNone(api.find_camera(verbose=True))
+
+    def test_diagnose_report(self):
+        text = winusb.diagnose()
+        for field in ('python ', '64-bit', 'platform win32', 'wow64', 'log file:', 'libusb:', 'camera: not connected'):
+            self.assertIn(field, text)
+        self.assertNotIn('camera query failed', text)
+        self.assertIn('usbflags', text)
+
+    @unittest.skipUnless(X64, 'struct sizes are the 64-bit ones')
+    def test_struct_sizes_on_the_real_platform(self):
+        self.assertEqual(ctypes.sizeof(winusb.GUID), 16)
+        self.assertEqual(ctypes.sizeof(winusb.SP_DEVINFO_DATA), 32)
+        self.assertEqual(ctypes.sizeof(winusb.SP_DEVINSTALL_PARAMS_W), 584)
+        self.assertEqual(ctypes.sizeof(winusb.SP_DRVINFO_DATA_W), 1568)
+        self.assertEqual(winusb.DETAIL_SIZEOF, 1584)

@@ -54,7 +54,32 @@ class Window(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
         self.addCleanup(self.dir.cleanup)
+        # driver.binding_state talks to SetupAPI, so it must never run on the UI thread; on Windows refresh_binding
+        # legitimately calls it from a worker. Record the calling threads instead of forbidding every call.
+        self.binding_threads = []
+
+        def fake_binding_state():
+            self.binding_threads.append(threading.current_thread())
+            return 'usbccgp'
+        p = mock.patch.object(A.driver, 'binding_state', side_effect=fake_binding_state)
+        p.start()
+        self.addCleanup(p.stop)
+        # the 4 s refresh after a driver job must not fire into a later test; record it instead
+        p = mock.patch.object(A.QTimer, 'singleShot')
+        self.single_shots = p.start()
+        self.addCleanup(p.stop)
+        self.threads_before = set(threading.enumerate())
         self.win = self.new_window()
+        self.addCleanup(self.settle)                    # runs first: before the window is deleted and patches end
+
+    def settle(self):
+        """Wait for worker threads started since setUp (refresh_binding) and deliver their signals."""
+        for t in set(threading.enumerate()) - self.threads_before:
+            t.join(5)
+        QT.processEvents()
+
+    def assert_binding_never_on_ui_thread(self):
+        self.assertNotIn(threading.main_thread(), self.binding_threads)
 
     def new_window(self):
         w = A.MainWindow()
@@ -210,8 +235,7 @@ class Window(unittest.TestCase):
         self.win.act_driver.setVisible(True)            # as on Windows: Qt reports hidden actions as disabled
         self.win.on_log('@driver missing')
         with mock.patch.object(QMessageBox, 'exec', lambda box: choose(box).click()), \
-                mock.patch.object(QMessageBox, 'information') as info, mock.patch.object(QMessageBox, 'warning') as warn, \
-                mock.patch.object(A.driver, 'binding_state', side_effect=AssertionError('UI thread')) as bs:
+                mock.patch.object(QMessageBox, 'information') as info, mock.patch.object(QMessageBox, 'warning') as warn:
             self.win.binding = patches.pop('state', 'usbccgp')
             for name, target in patches.items():
                 p = mock.patch.object(A.driver, name, **target)
@@ -223,8 +247,23 @@ class Window(unittest.TestCase):
             while self.win.drv_busy and time.time() < deadline:
                 QT.processEvents()
                 time.sleep(0.01)
-        bs.assert_not_called()                          # the dialog uses the cached state
+        self.settle()
+        self.assert_binding_never_on_ui_thread()        # the dialog uses the cached state
         return info, warn
+
+    def test_refresh_binding_on_windows_reads_the_state_off_the_ui_thread(self):
+        with mock.patch.object(A.driver, 'is_windows', return_value=True):
+            self.win.refresh_binding()
+        self.settle()
+        self.assertEqual(len(self.binding_threads), 1)
+        self.assertNotEqual(self.binding_threads[0], threading.main_thread())
+        self.assertEqual(self.win.binding, 'usbccgp')
+
+    def test_refresh_binding_elsewhere_does_nothing(self):
+        with mock.patch.object(A.driver, 'is_windows', return_value=False):
+            self.win.refresh_binding()
+        self.settle()
+        self.assertEqual(self.binding_threads, [])
 
     def test_the_dialog_offers_the_windows_driver_first(self):
         seen = {}
@@ -400,8 +439,7 @@ class Window(unittest.TestCase):
         self.win.binding = 'winusb'
         with mock.patch.object(QMessageBox, 'exec', lambda box: box.defaultButton().click()), \
                 mock.patch.object(QMessageBox, 'information') as info, \
-                mock.patch.object(A.driver, 'remove_inbox_winusb', return_value='removed') as rm, \
-                mock.patch.object(A.driver, 'binding_state', return_value='usbccgp'):
+                mock.patch.object(A.driver, 'remove_inbox_winusb', return_value='removed') as rm:
             self.win.offer_driver_remove()
             deadline = time.time() + 5
             while self.win.drv_busy and time.time() < deadline:

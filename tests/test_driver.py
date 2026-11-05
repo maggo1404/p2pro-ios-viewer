@@ -34,7 +34,8 @@ Anbietername:          libusbK
 
 class FindUrl(unittest.TestCase):
     def test_fixture(self):
-        html = open(os.path.join(HERE, 'fixtures', 'download_center_snippet.html'), encoding='utf-8').read()
+        with open(os.path.join(HERE, 'fixtures', 'download_center_snippet.html'), encoding='utf-8') as f:
+            html = f.read()
         self.assertEqual(driver.find_download_url(html), driver.FALLBACK_URL)
 
     def test_relative_and_other_markup(self):
