@@ -2,6 +2,7 @@
 import json
 import os
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -269,6 +270,64 @@ class Window(unittest.TestCase):
         self.calls['install_inbox_winusb'].assert_not_called()
         info.assert_called_once()
         self.assertFalse(self.win.banner.isVisible())
+        self.win.close()
+
+    def test_fallback_warning_defaults_to_cancel_and_names_the_certificate(self):
+        box, run = self.win.make_fallback_box()
+        self.assertEqual(box.defaultButton(), box.button(QMessageBox.Cancel))
+        self.assertEqual(box.escapeButton(), box.button(QMessageBox.Cancel))
+        self.assertEqual(run.text(), 'Run Vendor Installer')
+        text = box.informativeText()
+        for needle in ('unsigned', 'libwdi', 'Trusted Root', 'Trusted Publishers', 'certlm.msc', 'other camera models',
+                       'Try Windows Driver'):
+            self.assertIn(needle, text)
+        self.win.close()
+
+    def vendor_fallback_run(self, accept):
+        """Vendor flow with pnputil failing; the warning is answered on the UI thread."""
+        def fake_install(status, progress, cancel, confirm_fallback=None):
+            if confirm_fallback is not None and confirm_fallback():
+                return 'ran'
+            raise A.driver.DriverError('declined')
+        seen = {}
+
+        def exec_(box):
+            seen['dialog_hidden'] = not self.win.drv_dialog.isVisible()
+            seen['thread'] = threading.current_thread() is threading.main_thread()
+            run = [b for b in box.buttons() if b.text() == 'Run Vendor Installer'][0]
+            (run if accept else box.button(QMessageBox.Cancel)).click()
+        self.win.show()
+        with mock.patch.object(QMessageBox, 'exec', exec_), mock.patch.object(QMessageBox, 'information'), \
+                mock.patch.object(QMessageBox, 'warning') as warn, \
+                mock.patch.object(A.driver, 'install_from_download', fake_install):
+            self.win.start_driver_job('vendor', 'Installing Camera Driver')
+            deadline = time.time() + 5
+            while self.win.drv_busy and time.time() < deadline:
+                QT.processEvents()
+                time.sleep(0.01)
+        return seen, warn
+
+    def test_fallback_runs_only_after_an_explicit_yes(self):
+        seen, warn = self.vendor_fallback_run(True)
+        self.assertTrue(seen['thread'] and seen['dialog_hidden'])
+        warn.assert_not_called()
+        self.assertFalse(self.win.drv_busy)
+        self.win.close()
+
+    def test_fallback_declined_reports_failure(self):
+        _, warn = self.vendor_fallback_run(False)
+        warn.assert_called_once()
+        self.assertFalse(self.win.drv_busy)
+        self.win.close()
+
+    def test_closing_the_window_releases_a_waiting_worker(self):
+        out = []
+        self.win.drv_closing.set()
+        t = threading.Thread(target=lambda: out.append(self.win.ask_vendor_fallback()))
+        t.start()
+        t.join(3)
+        self.assertFalse(t.is_alive())
+        self.assertEqual(out, [False])
         self.win.close()
 
     def test_failed_windows_bind_shows_call_log_and_manual_steps(self):

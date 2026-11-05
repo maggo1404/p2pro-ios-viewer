@@ -139,6 +139,74 @@ class Traversal(unittest.TestCase):
                 driver.extract_driver(f, d)
 
 
+class VendorFallback(unittest.TestCase):
+    """install_from_download with pnputil failing: the vendor installer only runs after an explicit yes."""
+
+    def run_pipeline(self, **kw):
+        patches = dict(fetch_download_url='http://x', download='a', extract_driver='/x/P2Pro.inf',
+                       install_driver=0xE000022F, install_vendor_fallback=True, is_driver_installed=True)
+        patches.update(kw.pop('patches', {}))
+        started = {}
+        with tempfile.TemporaryDirectory() as td, mock.patch.object(driver, 'workdir') as wd:
+            wd.return_value.__enter__.return_value = td
+            ms = {}
+            for name, val in patches.items():
+                m = mock.patch.object(driver, name, **(dict(side_effect=val) if isinstance(val, BaseException) else dict(return_value=val)))
+                ms[name] = m.start()
+                self.addCleanup(m.stop)
+            try:
+                return driver.install_from_download(**kw), ms
+            finally:
+                started['ms'] = ms
+                self.ms = ms
+
+    def test_no_callback_skips_the_fallback(self):
+        with self.assertRaises(driver.DriverError) as cm:
+            self.run_pipeline()
+        self.ms['install_vendor_fallback'].assert_not_called()
+        self.assertIn('not signed', str(cm.exception))
+        self.assertIn('nothing was installed', str(cm.exception))
+        self.assertIn('no certificate was added', str(cm.exception))
+        self.assertNotIn('PC app', str(cm.exception))
+
+    def test_declined_skips_the_fallback(self):
+        ask = mock.Mock(return_value=False)
+        with self.assertRaises(driver.DriverError):
+            self.run_pipeline(confirm_fallback=ask)
+        ask.assert_called_once()
+        self.ms['install_vendor_fallback'].assert_not_called()
+
+    def test_a_failing_callback_counts_as_no(self):
+        with self.assertRaises(driver.DriverError):
+            self.run_pipeline(confirm_fallback=mock.Mock(side_effect=RuntimeError('x')))
+        self.ms['install_vendor_fallback'].assert_not_called()
+
+    def test_confirmed_runs_the_fallback(self):
+        msg, ms = self.run_pipeline(confirm_fallback=lambda: True)
+        ms['install_vendor_fallback'].assert_called_once()
+        self.assertIn('vendor installer', msg)
+
+    def test_confirmed_but_driver_not_detected_discloses_the_certificate(self):
+        with mock.patch.object(driver.time, 'sleep'), self.assertRaises(driver.DriverError) as cm:
+            self.run_pipeline(confirm_fallback=lambda: True, patches=dict(is_driver_installed=False))
+        self.assertIn('libwdi', str(cm.exception))
+        self.assertIn('certlm.msc', str(cm.exception))
+
+    def test_uac_cancel_propagates(self):
+        with self.assertRaises(driver.DriverCancelled):
+            self.run_pipeline(confirm_fallback=lambda: True,
+                              patches=dict(install_vendor_fallback=driver.DriverCancelled('denied')))
+
+    def test_pnputil_success_never_asks(self):
+        ask = mock.Mock()
+        self.run_pipeline(confirm_fallback=ask, patches=dict(install_driver=0))
+        ask.assert_not_called()
+        self.ms['install_vendor_fallback'].assert_not_called()
+
+    def test_docstring_mentions_the_certificate(self):
+        self.assertIn('libwdi', driver.install_vendor_fallback.__doc__)
+
+
 @unittest.skipUnless(os.environ.get('P2PRO_SETUP_EXE'), 'set P2PRO_SETUP_EXE to the downloaded installer')
 class RealInstaller(unittest.TestCase):
     def test_extract(self):

@@ -175,6 +175,15 @@ class ImageView(QWidget):
                 self.rect_drawn.emit(min(s0[0], s1[0]), min(s0[1], s1[1]), max(s0[0], s1[0]), max(s0[1], s1[1]))
 
 
+VENDOR_FALLBACK_TEXT = (
+    'Windows (pnputil) rejected the vendor driver because it is unsigned.\n\n'
+    'The alternative is to run the vendor\u2019s own installer tool as administrator. According to static analysis '
+    'of that tool (it has not been run here), it adds a self-signed certificate named \u201clibwdi\u201d to this '
+    'computer\u2019s Trusted Root and Trusted Publishers certificate stores. The certificate stays there until you '
+    'remove it by hand (certlm.msc). The tool may also install drivers for other camera models.\n\n'
+    'Alternative: cancel and choose \u201cTry Windows Driver\u201d, which needs no certificate.')
+
+
 class BusyDialog(QProgressDialog):
     """Progress dialog that Esc and the close button can't dismiss while keep_open is set (a job past the point of
     no return keeps running, so its progress must stay visible)."""
@@ -198,6 +207,7 @@ class MainWindow(QMainWindow):
     drv_status = Signal(str)
     drv_progress = Signal(int, int)
     drv_done = Signal(bool, str)
+    drv_confirm = Signal(object)            # (threading.Event, result dict): the worker waits for the UI thread
 
     def __init__(self):
         super().__init__()
@@ -262,6 +272,8 @@ class MainWindow(QMainWindow):
         self.status = QLabel()
         self.statusBar().addWidget(self.status, 1)
         self.log_signal.connect(self.on_log)
+        self.drv_closing = threading.Event()            # set when the window closes: releases a waiting worker
+        self.drv_confirm.connect(self.on_drv_confirm)
         self.drv_status.connect(self.on_drv_status)
         self.drv_progress.connect(self.on_drv_progress)
         self.drv_done.connect(self.on_drv_done)
@@ -675,7 +687,8 @@ class MainWindow(QMainWindow):
         def work():
             try:
                 if job == 'vendor':
-                    msg = driver.install_from_download(self.drv_status.emit, self.drv_progress.emit, self.drv_cancel)
+                    msg = driver.install_from_download(self.drv_status.emit, self.drv_progress.emit, self.drv_cancel,
+                                                       self.ask_vendor_fallback)
                 elif job == 'windows':
                     msg = driver.install_inbox_winusb(self.drv_status.emit, replace_libusbk)
                 else:
@@ -691,6 +704,43 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 self.drv_done.emit(False, f'{type(e).__name__}: {e}')
         threading.Thread(target=work, daemon=True).start()
+
+    def ask_vendor_fallback(self):
+        """Worker thread: asks the UI thread whether the vendor installer may run. Blocks until answered; False if
+        the window closes meanwhile (no Qt call happens here)."""
+        done, result = threading.Event(), {'ok': False}
+        self.drv_confirm.emit((done, result))
+        while not done.wait(0.2):
+            if self.drv_closing.is_set():
+                return False
+        return result['ok']
+
+    def make_fallback_box(self):
+        box = QMessageBox(QMessageBox.Warning, 'Run the Vendor Installer?', 'Windows rejected the driver.',
+                          QMessageBox.NoButton, self)
+        box.setInformativeText(VENDOR_FALLBACK_TEXT)
+        box.addButton(QMessageBox.Cancel)
+        run = box.addButton('Run Vendor Installer', QMessageBox.AcceptRole)
+        box.setDefaultButton(QMessageBox.Cancel)
+        box.setEscapeButton(QMessageBox.Cancel)
+        return box, run
+
+    def on_drv_confirm(self, req):
+        """UI thread: shows the warning (the busy dialog is hidden meanwhile) and releases the worker."""
+        done, result = req
+        try:
+            if self.drv_closing.is_set():
+                return
+            dlg = self.drv_dialog
+            if dlg:
+                dlg.hide()
+            box, run = self.make_fallback_box()
+            box.exec()
+            result['ok'] = box.clickedButton() is run
+            if dlg and self.drv_dialog is dlg:
+                dlg.show()
+        finally:
+            done.set()
 
     def on_drv_canceled(self):
         """Cancel (or Esc) on the progress dialog: stops the download; otherwise the dialog just stays."""
@@ -1275,6 +1325,7 @@ class MainWindow(QMainWindow):
         self.act_inspector.setChecked(bool(s.get('inspector', True)))
 
     def closeEvent(self, e):
+        self.drv_closing.set()
         try:
             with open(SETTINGS_FILE, 'w') as f:
                 json.dump(self.settings_dict(), f, indent=2)

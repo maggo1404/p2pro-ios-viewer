@@ -457,9 +457,16 @@ def install_driver(inf_path):
 
 
 def install_vendor_fallback(inf_path):
-    """The package has no signed catalog (CatalogFile=P2Pro.cat is not shipped), so pnputil is expected to fail on
-    current Windows. The vendor's PC app installs it with its own signed helper driver_install.exe (which makes a
-    catalog and trusts it). Run that helper from the extracted drivers folder; returns True if it was started."""
+    """Run the vendor's driver_install.exe elevated; returns True if it was started. Only call this after the user
+    has been told what it does and agreed (see install_from_download's confirm_fallback).
+
+    The package has no signed catalog (CatalogFile=P2Pro.cat is not shipped), so pnputil is expected to fail on
+    current Windows. According to static analysis of the vendor's tools (nothing was run): driver_install.exe runs
+    dpscat.exe, which creates a self-signed certificate, adds it to the machine's 'Root' (Trusted Root) and
+    'TrustedPublisher' stores under the friendly name "libwdi", deletes the private key and never removes the
+    certificate; dpinst64.exe then installs the driver. It first copies every INF from the package's inf folder,
+    so (inferred) drivers for other camera models may be installed as well. The certificate stays trusted until
+    it is removed by hand (certlm.msc)."""
     d = os.path.dirname(inf_path)
     for _ in range(3):
         exe = os.path.join(d, 'driver_install.exe')
@@ -470,9 +477,12 @@ def install_vendor_fallback(inf_path):
     return False
 
 
-def install_from_download(status=None, progress=None, cancel=None):
+def install_from_download(status=None, progress=None, cancel=None, confirm_fallback=None):
     """Whole pipeline: find link, download, unpack, install. Returns a message for the user.
-    status(text) / progress(done, total) are called from the calling thread. Raises DriverError."""
+    status(text) / progress(done, total) are called from the calling thread. Raises DriverError.
+    confirm_fallback() -> bool is called (from the calling thread) when pnputil has failed and the only way on is
+    the vendor's installer, which adds a certificate to the machine. Without a callback, or if it returns False,
+    that installer is not run (fail closed)."""
     say = status or (lambda s: None)
     with workdir() as wd:
         say('Looking up the driver download...')
@@ -486,17 +496,26 @@ def install_from_download(status=None, progress=None, cancel=None):
         if pnputil_ok(code):
             return pnputil_message(code) + ' Unplug and replug the camera.'
         msg = pnputil_message(code)
-        say('pnputil failed; trying the vendor installer...')
-        try:
-            started = install_vendor_fallback(inf)
-        except DriverCancelled:
-            raise
+        say('Windows rejected the unsigned driver package.')
+        allowed = False
+        if confirm_fallback is not None:
+            try:
+                allowed = bool(confirm_fallback())
+            except Exception:
+                allowed = False
+        if not allowed:
+            raise DriverError(msg + ' You chose not to run the vendor installer, so nothing was installed and no '
+                              'certificate was added. "Try Windows Driver" needs no certificate.')
+        say('Running the vendor installer (confirm the administrator prompt)...')
+        started = install_vendor_fallback(inf)          # DriverCancelled (UAC declined) propagates
         if started:
-            for _ in range(15):                     # the helper returns before the install is finished
+            for _ in range(15):                         # the helper returns before the install is finished
                 if is_driver_installed():
                     return 'Driver installed (vendor installer). Unplug and replug the camera.'
                 time.sleep(2)
-        raise DriverError(msg + ' Install the Thermal Master PC app once to get the driver.')
+        raise DriverError(msg + ' The vendor installer was run, but the driver was not detected afterwards. It may '
+                          'have added a certificate named "libwdi" to the Trusted Root and Trusted Publishers '
+                          'stores (remove it with certlm.msc). "Try Windows Driver" needs no certificate.')
 
 
 # --------------------------------------------------------------------------------- inbox WinUSB (no download)
