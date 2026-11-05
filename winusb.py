@@ -8,8 +8,8 @@ re-launches this program elevated with `--winusb-bind`, see run_cli); detection 
 
 Everything that talks to Windows is in SetupApi and loaded lazily. The rest (hardware-ID matching, multi-sz
 encoding, driver-node selection, state mapping, error texts, argument parsing, the bind/revert orchestration
-against an api object) is plain Python and tested on Linux. NOTHING in SetupApi has been run yet: each call is
-logged to `winusb_setup.log` so the first live run can be diagnosed (python winusb.py --diagnose).
+against an api object) is plain Python and tested on Linux. Binding the camera this way has been confirmed by a
+live test on Windows. Each SetupApi call is logged to `winusb_setup.log` for diagnosis (python winusb.py --diagnose).
 
 Sources: tmp/report_winusb.md (call sequence); struct layouts from setupapi.h (x64 packing = natural alignment).
 """
@@ -245,7 +245,7 @@ def make_struct(cls):
     return s
 
 
-# --------------------------------------------------------------------------------- Windows API (untested live)
+# --------------------------------------------------------------------------------- Windows API
 class SetupApi:
     """Thin SetupAPI/registry wrapper. Every call is logged by name with its result or error code, a failure
     raises WinUsbError naming the call. Only constructed on Windows."""

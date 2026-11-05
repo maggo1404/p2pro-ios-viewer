@@ -1,5 +1,5 @@
 """Run: python -m unittest discover tests. No Windows, no camera: struct layouts, pure logic and the bind/revert
-orchestration against a fake api. The SetupAPI calls themselves (winusb.SetupApi) have NOT been run anywhere."""
+orchestration against a fake api. The SetupAPI calls themselves (winusb.SetupApi) are not exercised here; binding has been confirmed by a live test."""
 import ctypes
 import json
 import inspect

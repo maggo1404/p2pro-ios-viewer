@@ -181,7 +181,7 @@ VENDOR_FALLBACK_TEXT = (
     'of that tool (it has not been run here), it adds a self-signed certificate named \u201clibwdi\u201d to this '
     'computer\u2019s Trusted Root and Trusted Publishers certificate stores. The certificate stays there until you '
     'remove it by hand (certlm.msc). The tool may also install drivers for other camera models.\n\n'
-    'Alternative: cancel and choose \u201cTry Windows Driver\u201d, which needs no certificate.')
+    'Alternative: cancel and choose \u201cUse Windows Driver\u201d, which needs no certificate.')
 
 
 class BusyDialog(QProgressDialog):
@@ -626,12 +626,11 @@ class MainWindow(QMainWindow):
         state = self.binding                                # cached: SetupAPI is not queried on the UI thread
         box = QMessageBox(QMessageBox.Question, 'Install Camera Driver',
                           'Which driver should the camera use?', QMessageBox.Cancel, self)
-        text = ('Windows driver: uses the WinUSB driver that is already part of Windows. Nothing is downloaded. '
+        text = ('Windows driver (recommended): uses the WinUSB driver that is already part of Windows. Nothing is downloaded. '
                 'Windows asks for administrator permission once, and the camera (USB 0BDA:5840) switches from the '
-                'generic USB composite driver to WinUSB; only the camera\u2019s own driver assignment changes. This '
-                'route has not been confirmed on real hardware yet. To undo it, choose '
-                'Camera > Remove Windows Driver Binding.\n\n'
-                'Vendor driver (the tested option): downloads the libusbK driver from thermalmaster.com, in the "Temp Master (P-Serie)" '
+                'generic USB composite driver to WinUSB; only the camera\u2019s own driver assignment changes. '
+                'To undo it, choose Camera > Remove Windows Driver Binding.\n\n'
+                'Vendor driver: downloads the libusbK driver from thermalmaster.com, in the "Temp Master (P-Serie)" '
                 'package, about 55 MB. Windows asks for administrator permission.')
         if state == 'libusbk':
             text += ('\n\nThe camera currently uses the vendor driver (libusbK). The Windows driver replaces it; '
@@ -641,7 +640,7 @@ class MainWindow(QMainWindow):
         elif state == 'absent':
             text += '\n\nThe Windows driver can only be set while the camera is plugged in.'
         box.setInformativeText(text)
-        windows = box.addButton('Try Windows Driver', QMessageBox.AcceptRole)
+        windows = box.addButton('Use Windows Driver', QMessageBox.AcceptRole)
         vendor = box.addButton('Download Vendor Driver…', QMessageBox.ActionRole)
         box.setDefaultButton(windows)
         box.exec()

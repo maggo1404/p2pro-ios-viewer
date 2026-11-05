@@ -274,12 +274,13 @@ class Window(unittest.TestCase):
             seen['text'] = box.informativeText()
             return box.button(QMessageBox.Cancel)
         self.run_install(look, state='libusbk')
-        self.assertEqual(seen['default'], 'Try Windows Driver')
+        self.assertEqual(seen['default'], 'Use Windows Driver')
         self.assertIn('Download Vendor Driver…', seen['buttons'])
         self.assertIn('libusbK', seen['text'])
         self.assertIn('Thermal Master app may need', seen['text'])
-        self.assertIn('not been confirmed on real hardware', seen['text'])
-        self.assertNotIn('recommended', seen['text'].lower())
+        self.assertIn('(recommended)', seen['text'])
+        self.assertNotIn('not been confirmed', seen['text'])
+        self.assertNotIn('tested option', seen['text'])
         self.assertFalse(self.win.drv_busy)
 
     def test_windows_driver_flow_clears_the_notice(self):
@@ -318,7 +319,7 @@ class Window(unittest.TestCase):
         self.assertEqual(run.text(), 'Run Vendor Installer')
         text = box.informativeText()
         for needle in ('unsigned', 'libwdi', 'Trusted Root', 'Trusted Publishers', 'certlm.msc', 'other camera models',
-                       'Try Windows Driver'):
+                       'Use Windows Driver'):
             self.assertIn(needle, text)
         self.win.close()
 

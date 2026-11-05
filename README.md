@@ -15,11 +15,10 @@ the controls use the native style.*
 > tested it and steered. Treat it as an experiment, not as reviewed software.
 
 > [!WARNING]
-> **Tested with exactly one camera**: a Thermal Master P2 Pro with the **Lightning** connector
-> (USB ID `0BDA:5840`, USB strings "infisense" / "P2 Pro"), on Windows 11. Nothing else was tried:
-> not other P2 Pro units, not the USB-C version, not other operating systems.
-> The startup sequence in `init_cmds.json` was recorded from that one camera, so it may not work
-> for other units (see [How it was done](#how-it-was-done)).
+> **Tested with two P2 Pro cameras, both the iOS (Lightning) version, on Windows.** The USB-C version was not tested.
+> The app talks to USB ID `0BDA:5840` only. Nothing else was tried: no other cameras, no other operating systems.
+> The startup sequence in `init_cmds.json` was recorded from one camera session, so it may not work
+> on other units (see [How it was done](#how-it-was-done)).
 > **Temperature readings have not been checked against any reference** (see [Temperatures](#temperatures)).
 
 Background: the camera works on an iPhone. On the test PC the vendor's Thermal Master app showed
@@ -34,45 +33,43 @@ python app.py              # full app with side panel
 python viewer.py           # minimal OpenCV-only viewer
 ```
 
-* **Driver (Windows):** the camera needs a driver that libusb can use. On start the app checks which one is bound; if
-  none is, a notice above the image offers two options (also under *Camera > Install Camera Driver…*). Replug the
+* **Driver (Windows):** libusb needs a driver it can talk to. On start the app checks which one is bound. If there is
+  none, a notice above the image offers two options (also under *Camera > Install Camera Driver…*). Replug the
   camera afterwards.
-  * **A. Windows' own WinUSB driver (default, not yet tested, see the box below).** The app binds the WinUSB driver
-    that ships with Windows (`winusb.inf`) to the camera. Nothing is downloaded and no driver package is added; Windows
-    shows one UAC prompt. Only the camera's device node is changed, from the generic USB composite driver to WinUSB.
-    To undo it, use *Camera > Remove Windows Driver Binding…*. Code: `winusb.py`.
+  * **A. Windows' own WinUSB driver (default, recommended, see the box below).** The app binds the WinUSB driver
+    that ships with Windows (`winusb.inf`) to the camera. Nothing is downloaded and no driver package is added.
+    Windows shows one UAC prompt. Only the camera's device node changes, from the generic USB composite driver to
+    WinUSB. *Camera > Remove Windows Driver Binding…* is meant to undo it, but nobody has tried it yet. Code: `winusb.py`.
   * **B. Vendor libusbK driver.** The app looks up "Temp Master (P-Serie)" on thermalmaster.com's download center,
     downloads that installer (~55 MB, needs internet), unpacks only its `drivers` folder (pure Python, the installer
     itself is never run) and tries to install `P2Pro.inf` via `pnputil` with a UAC prompt. The package is unsigned, so
-    this is expected to fail on current Windows; the app then asks for confirmation and, if you agree, runs the
+    this is expected to fail on current Windows. The app then asks for confirmation and, if you agree, runs the
     vendor's `driver_install.exe` from that folder, elevated (see below for what it does). Code: `driver.py`, `inno.py`.
-* The camera shows up as `USB\VID_0BDA&PID_5840`. **All testing so far was done with the libusbK driver**, which on
-  the test PC had been installed by the Thermal Master PC app (its `drivers/inf/P2Pro.inf`). Close
-  Thermal Master before starting.
+* The camera shows up as `USB\VID_0BDA&PID_5840`. The vendor libusbK driver was used first; on the test PC the
+  Thermal Master PC app had installed it (its `drivers/inf/P2Pro.inf`). The WinUSB driver (option A) has since been
+  confirmed to work too. Close Thermal Master before starting.
 * **Unplug and replug the camera before every start.** After a session ends, the camera didn't
   answer a new handshake in our tests until it was power-cycled.
 
-> [!WARNING]
-> **The WinUSB option (A) has not been tested on Windows or with the camera.** It was written and unit-tested on
-> Linux with the Windows calls mocked. The central assumption is that Windows accepts this driver, which does not
-> match the camera's hardware IDs, through the SetupAPI call sequence. Microsoft documents the equivalent Device
-> Manager steps; no prior example of doing it through the API was found. If it fails, use option B, or do it by hand:
-> Device Manager > right-click the camera > Update driver > Browse my computer for drivers > Let me pick from a list
-> of available drivers on my computer > Universal Serial Bus devices > WinUsb Device. For troubleshooting run
+> [!NOTE]
+> **WinUSB (option A) was tested by the author:** the driver bound to the camera and the app used the camera through it
+> without the vendor driver. That is a small test and all that was confirmed. The undo command *Camera > Remove Windows
+> Driver Binding…* exists but has not been tried. If binding fails, use option B, or do it by hand: Device Manager > right-click the camera > Update driver > Browse my computer for drivers > Let me pick from
+> a list of available drivers on my computer > Universal Serial Bus devices > WinUsb Device. For troubleshooting run
 > `python winusb.py --diagnose`; the setup steps are logged to `winusb_setup.log` in `%TEMP%`.
 
 Why the app offers WinUSB: the vendor's INF has no catalog file, so the package is unsigned. Static analysis of the
 vendor's tools (nothing was run) shows how it gets installed anyway: `driver_install.exe` copies every INF from `inf\`
 next to it and starts `install.exe`, which runs an embedded batch file: `dpscat.exe`, then `dpinst64.exe`, then
 `del *.inf *.cat`. In its code, `dpscat.exe` creates a self-signed certificate, adds it to the machine's 'Root' and
-'TrustedPublisher' stores with the friendly name "libwdi", signs a catalog and deletes the private key; neither it nor the batch
-file removes the certificate afterwards. So after this route the certificate should stay trusted until you remove it
+'TrustedPublisher' stores with the friendly name "libwdi", signs a catalog and deletes the private key. Neither it nor
+the batch file removes the certificate afterwards. So after this route the certificate should stay trusted until you remove it
 (`certlm.msc`). Option B ends up on this route when `pnputil` fails, and so, presumably, does the Thermal Master app's
-own driver setup. Whether every INF gets installed this way was inferred, not observed. The WinUSB route installs no
+own driver setup. That every INF gets installed this way was inferred, not observed. The WinUSB route installs no
 INF and no certificate.
 
 * Recording and RTSP use **ffmpeg**. The Windows exe contains it (taken from the `imageio-ffmpeg`
-  package at build time); from source it's found on PATH or via `imageio-ffmpeg` (in `requirements.txt`). Without any ffmpeg, recording falls back to OpenCV
+  package at build time); from source it is found on PATH or via `imageio-ffmpeg` (in `requirements.txt`). Without any ffmpeg, recording falls back to OpenCV
   (MPEG-4 Part 2 instead of H.264, larger files) and RTSP is disabled. RTSP also needs MediaMTX:
   `python tools/get_mediamtx.py`.
 
@@ -214,7 +211,7 @@ Interpretation: shutter close / open. The app uses the frames in between as the 
 | `app.py` | the Qt app (side panel, measurement, enhancement, recording, RTSP) |
 | `ui.py` | system-palette colours, toolbar icons, disclosure sections, segmented controls |
 | `driver.py` | driver check and install: vendor libusbK download, `pnputil`, WinUSB option |
-| `winusb.py` | binds Windows' inbox WinUSB driver to the camera via SetupAPI, removes it again; `--diagnose` (untested on Windows) |
+| `winusb.py` | binds Windows' inbox WinUSB driver to the camera via SetupAPI, removes it again; `--diagnose` |
 | `inno.py` | pure-Python reader for the Inno Setup installer, used to unpack the vendor `drivers` folder |
 | `tests/` | unit tests (`python -m pytest tests`); Windows calls are mocked |
 | `camera.py` | camera driver (handshake, init sequence, frame decoding, shutter) |

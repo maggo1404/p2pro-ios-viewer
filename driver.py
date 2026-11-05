@@ -505,7 +505,7 @@ def install_from_download(status=None, progress=None, cancel=None, confirm_fallb
                 allowed = False
         if not allowed:
             raise DriverError(msg + ' You chose not to run the vendor installer, so nothing was installed and no '
-                              'certificate was added. "Try Windows Driver" needs no certificate.')
+                              'certificate was added. "Use Windows Driver" needs no certificate.')
         say('Running the vendor installer (confirm the administrator prompt)...')
         started = install_vendor_fallback(inf)          # DriverCancelled (UAC declined) propagates
         if started:
@@ -515,7 +515,7 @@ def install_from_download(status=None, progress=None, cancel=None, confirm_fallb
                 time.sleep(2)
         raise DriverError(msg + ' The vendor installer was run, but the driver was not detected afterwards. It may '
                           'have added a certificate named "libwdi" to the Trusted Root and Trusted Publishers '
-                          'stores (remove it with certlm.msc). "Try Windows Driver" needs no certificate.')
+                          'stores (remove it with certlm.msc). "Use Windows Driver" needs no certificate.')
 
 
 # --------------------------------------------------------------------------------- inbox WinUSB (no download)
