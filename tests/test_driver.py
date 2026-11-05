@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import driver  # noqa: E402
@@ -33,7 +34,8 @@ Anbietername:          libusbK
 
 class FindUrl(unittest.TestCase):
     def test_fixture(self):
-        html = open(os.path.join(HERE, 'fixtures', 'download_center_snippet.html'), encoding='utf-8').read()
+        with open(os.path.join(HERE, 'fixtures', 'download_center_snippet.html'), encoding='utf-8') as f:
+            html = f.read()
         self.assertEqual(driver.find_download_url(html), driver.FALLBACK_URL)
 
     def test_relative_and_other_markup(self):
@@ -66,6 +68,29 @@ class Pnputil(unittest.TestCase):
         self.assertFalse(driver.service_is_usable('usbccgp'))
         self.assertTrue(driver.pnputil_ok(3010) and driver.pnputil_ok(259) and not driver.pnputil_ok(1))
         self.assertIn('not signed', driver.pnputil_message(0xE000022F))
+
+
+class Installed(unittest.TestCase):
+    def check(self, state, store=None, reg=None):
+        with mock.patch.object(driver, 'is_windows', return_value=True), \
+                mock.patch.object(driver.winusb, 'binding_state', return_value=state), \
+                mock.patch.object(driver, '_store_check', return_value=store), \
+                mock.patch.object(driver, '_registry_check', return_value=reg):
+            return driver.is_driver_installed()
+
+    def test_bound_camera_counts_as_installed(self):
+        self.assertTrue(self.check('winusb', store=False, reg=False))
+        self.assertTrue(self.check('libusbk', store=False, reg=False))
+
+    def test_old_behaviour_is_kept(self):
+        self.assertTrue(self.check('usbccgp', store=True))                  # P2Pro.inf in the store is still enough
+        self.assertTrue(self.check('absent', reg=True))
+        self.assertFalse(self.check('usbccgp', store=False, reg=False))
+        self.assertIsNone(self.check('absent', store=None, reg=None))
+
+    def test_not_windows(self):
+        with mock.patch.object(driver, 'is_windows', return_value=False):
+            self.assertTrue(driver.is_driver_installed())
 
 
 class Traversal(unittest.TestCase):
@@ -113,6 +138,74 @@ class Traversal(unittest.TestCase):
                 fh.write(b'MZ' + b'\0' * 100)
             with self.assertRaises(driver.DriverError):
                 driver.extract_driver(f, d)
+
+
+class VendorFallback(unittest.TestCase):
+    """install_from_download with pnputil failing: the vendor installer only runs after an explicit yes."""
+
+    def run_pipeline(self, **kw):
+        patches = dict(fetch_download_url='http://x', download='a', extract_driver='/x/P2Pro.inf',
+                       install_driver=0xE000022F, install_vendor_fallback=True, is_driver_installed=True)
+        patches.update(kw.pop('patches', {}))
+        started = {}
+        with tempfile.TemporaryDirectory() as td, mock.patch.object(driver, 'workdir') as wd:
+            wd.return_value.__enter__.return_value = td
+            ms = {}
+            for name, val in patches.items():
+                m = mock.patch.object(driver, name, **(dict(side_effect=val) if isinstance(val, BaseException) else dict(return_value=val)))
+                ms[name] = m.start()
+                self.addCleanup(m.stop)
+            try:
+                return driver.install_from_download(**kw), ms
+            finally:
+                started['ms'] = ms
+                self.ms = ms
+
+    def test_no_callback_skips_the_fallback(self):
+        with self.assertRaises(driver.DriverError) as cm:
+            self.run_pipeline()
+        self.ms['install_vendor_fallback'].assert_not_called()
+        self.assertIn('not signed', str(cm.exception))
+        self.assertIn('nothing was installed', str(cm.exception))
+        self.assertIn('no certificate was added', str(cm.exception))
+        self.assertNotIn('PC app', str(cm.exception))
+
+    def test_declined_skips_the_fallback(self):
+        ask = mock.Mock(return_value=False)
+        with self.assertRaises(driver.DriverError):
+            self.run_pipeline(confirm_fallback=ask)
+        ask.assert_called_once()
+        self.ms['install_vendor_fallback'].assert_not_called()
+
+    def test_a_failing_callback_counts_as_no(self):
+        with self.assertRaises(driver.DriverError):
+            self.run_pipeline(confirm_fallback=mock.Mock(side_effect=RuntimeError('x')))
+        self.ms['install_vendor_fallback'].assert_not_called()
+
+    def test_confirmed_runs_the_fallback(self):
+        msg, ms = self.run_pipeline(confirm_fallback=lambda: True)
+        ms['install_vendor_fallback'].assert_called_once()
+        self.assertIn('vendor installer', msg)
+
+    def test_confirmed_but_driver_not_detected_discloses_the_certificate(self):
+        with mock.patch.object(driver.time, 'sleep'), self.assertRaises(driver.DriverError) as cm:
+            self.run_pipeline(confirm_fallback=lambda: True, patches=dict(is_driver_installed=False))
+        self.assertIn('libwdi', str(cm.exception))
+        self.assertIn('certlm.msc', str(cm.exception))
+
+    def test_uac_cancel_propagates(self):
+        with self.assertRaises(driver.DriverCancelled):
+            self.run_pipeline(confirm_fallback=lambda: True,
+                              patches=dict(install_vendor_fallback=driver.DriverCancelled('denied')))
+
+    def test_pnputil_success_never_asks(self):
+        ask = mock.Mock()
+        self.run_pipeline(confirm_fallback=ask, patches=dict(install_driver=0))
+        ask.assert_not_called()
+        self.ms['install_vendor_fallback'].assert_not_called()
+
+    def test_docstring_mentions_the_certificate(self):
+        self.assertIn('libwdi', driver.install_vendor_fallback.__doc__)
 
 
 @unittest.skipUnless(os.environ.get('P2PRO_SETUP_EXE'), 'set P2PRO_SETUP_EXE to the downloaded installer')

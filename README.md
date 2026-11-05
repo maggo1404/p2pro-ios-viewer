@@ -3,7 +3,11 @@
 A Python app for using the **Thermal Master P2 Pro with the Lightning (iOS) connector on a Windows PC**:
 live image, temperature cursors and boxes, image enhancement, recording and RTSP streaming.
 
-![the app with the camera connected: thermal image with two measurement rectangles, colour scale and side panel](app.png)
+![the app window: menu bar and toolbar at the top, thermal image with a cursor, two measurement rectangles and a colour scale, collapsible settings panel on the right](app.png)
+
+*The interface, rendered on Linux from a frame of the USB capture in `capture/`, not from a live session. The capture
+has no shutter reference, so this image is noisier than a live one and its temperatures are not meaningful. On Windows
+the controls use the native style.*
 
 > [!CAUTION]
 > **This project was completely vibe-coded.** All the code, the reverse engineering and this README
@@ -11,11 +15,10 @@ live image, temperature cursors and boxes, image enhancement, recording and RTSP
 > tested it and steered. Treat it as an experiment, not as reviewed software.
 
 > [!WARNING]
-> **Tested with exactly one camera**: a Thermal Master P2 Pro with the **Lightning** connector
-> (USB ID `0BDA:5840`, USB strings "infisense" / "P2 Pro"), on Windows 11. Nothing else was tried:
-> not other P2 Pro units, not the USB-C version, not other operating systems.
-> The startup sequence in `init_cmds.json` was recorded from that one camera, so it may not work
-> for other units (see [How it was done](#how-it-was-done)).
+> **Tested with two P2 Pro cameras, both the iOS (Lightning) version, on Windows.** The USB-C version was not tested.
+> The app talks to USB ID `0BDA:5840` only. Nothing else was tried: no other cameras, no other operating systems.
+> The startup sequence in `init_cmds.json` was recorded from one camera session, so it may not work
+> on other units (see [How it was done](#how-it-was-done)).
 > **Temperature readings have not been checked against any reference** (see [Temperatures](#temperatures)).
 
 Background: the camera works on an iPhone. On the test PC the vendor's Thermal Master app showed
@@ -30,27 +33,57 @@ python app.py              # full app with side panel
 python viewer.py           # minimal OpenCV-only viewer
 ```
 
-* **Driver (Windows):** on start the app checks whether the libusbK driver (`P2Pro.inf`) is installed. If not
-  a notice above the image offers to install it: it looks up "Temp Master (P-Serie)" on thermalmaster.com's download center,
-  downloads that installer (~55 MB, needs internet), unpacks only its `drivers` folder (pure Python, the installer
-  is never run) and installs the driver via `pnputil` with a UAC prompt (admin rights). The menu command
-  *Camera > Install Camera Driver…* does the same on demand. Replug the camera afterwards. Code: `driver.py`, `inno.py`.
-* The camera shows up as `USB\VID_0BDA&PID_5840`. It was tested with the **libusbK** driver, which on
-  the test PC had been installed by the Thermal Master PC app (its `drivers/inf/P2Pro.inf`). Close
-  Thermal Master before starting.
+* **Driver (Windows):** libusb needs a driver it can talk to. On start the app checks which one is bound. If there is
+  none, a notice above the image offers two options (also under *Camera > Install Camera Driver…*). Replug the
+  camera afterwards.
+  * **A. Windows' own WinUSB driver (default, recommended, see the box below).** The app binds the WinUSB driver
+    that ships with Windows (`winusb.inf`) to the camera. Nothing is downloaded and no driver package is added.
+    Windows shows one UAC prompt. Only the camera's device node changes, from the generic USB composite driver to
+    WinUSB. *Camera > Remove Windows Driver Binding…* is meant to undo it, but nobody has tried it yet. Code: `winusb.py`.
+  * **B. Vendor libusbK driver.** The app looks up "Temp Master (P-Serie)" on thermalmaster.com's download center,
+    downloads that installer (~55 MB, needs internet), unpacks only its `drivers` folder (pure Python, the installer
+    itself is never run) and tries to install `P2Pro.inf` via `pnputil` with a UAC prompt. The package is unsigned, so
+    this is expected to fail on current Windows. The app then asks for confirmation and, if you agree, runs the
+    vendor's `driver_install.exe` from that folder, elevated (see below for what it does). Code: `driver.py`, `inno.py`.
+* The camera shows up as `USB\VID_0BDA&PID_5840`. The vendor libusbK driver was used first; on the test PC the
+  Thermal Master PC app had installed it (its `drivers/inf/P2Pro.inf`). The WinUSB driver (option A) has since been
+  confirmed to work too. Close Thermal Master before starting.
 * **Unplug and replug the camera before every start.** After a session ends, the camera didn't
   answer a new handshake in our tests until it was power-cycled.
+
+> [!NOTE]
+> **WinUSB (option A) was tested by the author:** the driver bound to the camera and the app used the camera through it
+> without the vendor driver. That is a small test and all that was confirmed. The undo command *Camera > Remove Windows
+> Driver Binding…* exists but has not been tried. If binding fails, use option B, or do it by hand: Device Manager > right-click the camera > Update driver > Browse my computer for drivers > Let me pick from
+> a list of available drivers on my computer > Universal Serial Bus devices > WinUsb Device. For troubleshooting run
+> `python winusb.py --diagnose`; the setup steps are logged to `winusb_setup.log` in `%TEMP%`.
+
+Why the app offers WinUSB: the vendor's INF has no catalog file, so the package is unsigned. Static analysis of the
+vendor's tools (nothing was run) shows how it gets installed anyway: `driver_install.exe` copies every INF from `inf\`
+next to it and starts `install.exe`, which runs an embedded batch file: `dpscat.exe`, then `dpinst64.exe`, then
+`del *.inf *.cat`. In its code, `dpscat.exe` creates a self-signed certificate, adds it to the machine's 'Root' and
+'TrustedPublisher' stores with the friendly name "libwdi", signs a catalog and deletes the private key. Neither it nor
+the batch file removes the certificate afterwards. So after this route the certificate should stay trusted until you remove it
+(`certlm.msc`). Option B ends up on this route when `pnputil` fails, and so, presumably, does the Thermal Master app's
+own driver setup. That every INF gets installed this way was inferred, not observed. The WinUSB route installs no
+INF and no certificate.
+
 * Recording and RTSP use **ffmpeg**. The Windows exe contains it (taken from the `imageio-ffmpeg`
-  package at build time); from source it's found on PATH or via `imageio-ffmpeg` (in `requirements.txt`). Without any ffmpeg, recording falls back to OpenCV
+  package at build time); from source it is found on PATH or via `imageio-ffmpeg` (in `requirements.txt`). Without any ffmpeg, recording falls back to OpenCV
   (MPEG-4 Part 2 instead of H.264, larger files) and RTSP is disabled. RTSP also needs MediaMTX:
   `python tools/get_mediamtx.py`.
 
 ### App features (`app.py`)
+* **Interface**: menu bar with every command and its shortcut; toolbar for Connect, Shutter, Snapshot, Record and
+  Stream, which also shows the connection, recording and stream state; resizable settings panel with collapsible
+  sections that can be hidden for more image space (Ctrl+I); full screen. It follows the system's light or dark
+  appearance and uses neutral colours, so the only saturated colours on screen are the thermal image and the red
+  recording and error signals. Panel layout and window size are remembered (`ui.py`).
 * **Measurement**: click = temperature cursor, drag = rectangle (max / min / average, hottest and
   coldest points marked), right click = delete; *Clear All* button and *Measure* menu; global hottest/coldest markers;
   center crosshair; °C / °F; temperature calibration (see below).
 * **Display**: 9 palettes; auto scale (coldest pixel = bottom of the scale, hottest = top) or fixed
-  range, "Lock current" freezes the current auto range; contrast mapping linear / plateau histogram
+  range, "Lock Current" freezes the current auto range; contrast mapping linear / plateau histogram
   equalization / CLAHE; rotation 0° / 90° / 180° / 270° and mirroring horizontally / vertically (applied
   after the rotation, i.e. on the screen axes; cursors and rectangles move along).
 * **Image enhancement**: bad-pixel repair, stripe (row/column noise) removal, motion-adaptive temporal
@@ -62,12 +95,10 @@ python viewer.py           # minimal OpenCV-only viewer
   JPEG plus the temperature of every pixel as CSV, XML or 32-bit float TIFF (opens in ImageJ/Fiji,
   Python, MATLAB), in °C or °F, in the displayed orientation, with metadata (time, palette, range,
   rotation, calibration); MP4 recording
-  (`recordings/`), **RTSP stream** at `rtsp://<pc-ip>:8554/thermal` (URL shown in the panel).
+  (`recordings/`), **RTSP stream** at `rtsp://<pc-ip>:8554/thermal` (URL shown under *Output* while streaming).
 * Settings are saved in `settings.json`. Keyboard shortcuts: Del = clear all, S = snapshot,
   C = shutter calibration, R = next rotation step, A = auto/fixed scale, Esc = cancel calibration,
   Ctrl+E = export, Ctrl+I = show/hide the side panel. Every command is in the menu bar.
-* **Interface**: follows the system's light or dark appearance and accent colour, with neutral chrome so
-  the only saturated colour on screen is the thermal image (`ui.py`).
 
 **Testing:** the author used `app.py` with the real camera. The RTSP stream was only received by an
 ffmpeg client on the same PC, not from another device.
@@ -123,6 +154,12 @@ Everything here was observed in the capture or on the camera, except where marke
 **interpretation**: that's a reading of the data that was not proven.
 
 ### USB layout (`0BDA:5840`)
+From the descriptors in the capture: device class EF/02/01, bcdUSB 2.00, one configuration, no interface
+association descriptor, a serial number string is present (not printed here, it identifies the unit). All endpoints
+are bulk with a 512-byte maximum packet size; interface 1 alt 0 has no endpoints. Without a vendor INF, Windows is
+expected to load `usbccgp` (generic composite driver) for this class; that comes from Microsoft's documentation and
+was not observed.
+
 | interface | purpose | endpoints |
 |---|---|---|
 | 0 "iAP Interface" (class FF/F0/00) | iAP2 link | OUT 0x05, IN 0x86 |
@@ -173,6 +210,10 @@ Interpretation: shutter close / open. The app uses the frames in between as the 
 |---|---|
 | `app.py` | the Qt app (side panel, measurement, enhancement, recording, RTSP) |
 | `ui.py` | system-palette colours, toolbar icons, disclosure sections, segmented controls |
+| `driver.py` | driver check and install: vendor libusbK download, `pnputil`, WinUSB option |
+| `winusb.py` | binds Windows' inbox WinUSB driver to the camera via SetupAPI, removes it again; `--diagnose` |
+| `inno.py` | pure-Python reader for the Inno Setup installer, used to unpack the vendor `drivers` folder |
+| `tests/` | unit tests (`python -m pytest tests`); Windows calls are mocked |
 | `camera.py` | camera driver (handshake, init sequence, frame decoding, shutter) |
 | `processing.py` | temperatures, enhancement pipeline, palettes, super-resolution |
 | `streaming.py` | RTSP (MediaMTX + ffmpeg) and MP4 recording |
@@ -188,6 +229,6 @@ Interpretation: shutter close / open. The app uses the frames in between as the 
 | `tools/decode.py`, `tools/dump.py` | rebuild USB transactions from a capture / make `dump.txt` |
 | `tools/get_mediamtx.py` | downloads the MediaMTX RTSP server into `bin/` |
 | `tools/upv_sdk/` | USB Packet Viewer SDK (github.com/UsbPacketViewer/sdk, MIT) |
-| `app.png` | screenshot of the app |
+| `app.png` | screenshot of the app, rendered from a frame of the USB capture |
 | `setup.png` | photo of the sniffing setup |
 | `experiments/` | the probing scripts used before the capture, kept as a record. They expect `iap2.py` in the same folder and weren't updated after being moved here |
