@@ -10,7 +10,7 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 import numpy as np
 from PySide6.QtGui import QColor, QPalette
-from PySide6.QtWidgets import QApplication, QMessageBox, QToolBar
+from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton, QToolBar
 
 import app as A
 import ui
@@ -203,24 +203,164 @@ class Window(unittest.TestCase):
         self.assertTrue(self.win.banner.isVisible())
         self.win.close()
 
-    def test_install_flow_clears_the_notice(self):
+    def run_install(self, choose, **patches):
+        """Open the driver dialog, press the button `choose(box)` and wait for the worker."""
         self.win.show()
         self.win.act_driver.setVisible(True)            # as on Windows: Qt reports hidden actions as disabled
         self.win.on_log('@driver missing')
-        with mock.patch.object(QMessageBox, 'exec', lambda box: box.defaultButton().click()), \
-                mock.patch.object(QMessageBox, 'information') as info, \
-                mock.patch.object(A.driver, 'install_from_download', return_value='installed') as install:
+        with mock.patch.object(QMessageBox, 'exec', lambda box: choose(box).click()), \
+                mock.patch.object(QMessageBox, 'information') as info, mock.patch.object(QMessageBox, 'warning') as warn, \
+                mock.patch.object(A.driver, 'binding_state', side_effect=AssertionError('UI thread')) as bs:
+            self.win.binding = patches.pop('state', 'usbccgp')
+            for name, target in patches.items():
+                p = mock.patch.object(A.driver, name, **target)
+                self.calls = getattr(self, 'calls', {})
+                self.calls[name] = p.start()
+                self.addCleanup(p.stop)
             self.win.offer_driver_install()
             deadline = time.time() + 5
             while self.win.drv_busy and time.time() < deadline:
                 QT.processEvents()
                 time.sleep(0.01)
-        install.assert_called_once()
+        bs.assert_not_called()                          # the dialog uses the cached state
+        return info, warn
+
+    def test_the_dialog_offers_the_windows_driver_first(self):
+        seen = {}
+
+        def look(box):
+            seen['default'] = box.defaultButton().text()
+            seen['buttons'] = [b.text() for b in box.buttons()]
+            seen['text'] = box.informativeText()
+            return box.button(QMessageBox.Cancel)
+        self.run_install(look, state='libusbk')
+        self.assertEqual(seen['default'], 'Try Windows Driver')
+        self.assertIn('Download Vendor Driver…', seen['buttons'])
+        self.assertIn('libusbK', seen['text'])
+        self.assertIn('Thermal Master app may need', seen['text'])
+        self.assertIn('not been confirmed on real hardware', seen['text'])
+        self.assertNotIn('recommended', seen['text'].lower())
+        self.assertFalse(self.win.drv_busy)
+
+    def test_windows_driver_flow_clears_the_notice(self):
+        info, warn = self.run_install(lambda box: box.defaultButton(),
+                                      install_inbox_winusb=dict(return_value='installed'),
+                                      install_from_download=dict(return_value='x'))
+        self.calls['install_inbox_winusb'].assert_called_once()
+        self.calls['install_from_download'].assert_not_called()
         info.assert_called_once()
+        warn.assert_not_called()
         self.assertFalse(self.win.drv_busy)
         self.assertFalse(self.win.banner.isVisible())
         self.assertTrue(self.win.act_driver.isEnabled())
         self.win.close()
+
+    def test_replacing_libusbk_is_passed_on(self):
+        self.run_install(lambda box: box.defaultButton(), state='libusbk',
+                         install_inbox_winusb=dict(return_value='installed'))
+        self.assertEqual(self.calls['install_inbox_winusb'].call_args.args[1], True)
+        self.win.close()
+
+    def test_vendor_flow_still_available(self):
+        info, _ = self.run_install(lambda box: [b for b in box.buttons() if b.text().startswith('Download')][0],
+                                   install_inbox_winusb=dict(return_value='x'),
+                                   install_from_download=dict(return_value='installed'))
+        self.calls['install_from_download'].assert_called_once()
+        self.calls['install_inbox_winusb'].assert_not_called()
+        info.assert_called_once()
+        self.assertFalse(self.win.banner.isVisible())
+        self.win.close()
+
+    def test_failed_windows_bind_shows_call_log_and_manual_steps(self):
+        _, warn = self.run_install(lambda box: box.defaultButton(),
+                                   install_inbox_winusb=dict(side_effect=A.driver.DriverError(
+                                       'DiInstallDevice failed: access denied (0x5). Details: C:\\t\\winusb_setup.log')))
+        text = warn.call_args.args[2]
+        self.assertIn('DiInstallDevice', text)
+        self.assertIn('winusb_setup.log', text)
+        self.assertIn('Let me pick', text)
+        self.assertIn('Download Vendor Driver', text)
+        self.assertTrue(self.win.banner.isVisible())
+        self.win.close()
+
+    def test_absent_camera_says_plug_it_in_without_manual_steps(self):
+        _, warn = self.run_install(lambda box: box.defaultButton(), state='absent',
+                                   install_inbox_winusb=dict(side_effect=A.driver.DriverCameraAbsent('Plug it in first')))
+        self.assertIn('Plug it in first', warn.call_args.args[2])
+        self.assertNotIn('Let me pick', warn.call_args.args[2])
+
+    def test_esc_on_the_busy_dialog_keeps_it_open(self):
+        self.win.show()
+        with mock.patch.object(A.driver, 'install_inbox_winusb', side_effect=lambda *a: time.sleep(0.3) or 'ok'), \
+                mock.patch.object(QMessageBox, 'information'):
+            self.win.start_driver_job('windows', 'Setting Up Camera Driver')
+            dlg = self.win.drv_dialog
+            dlg.reject()                                # what Esc does
+            for _ in range(5):
+                QT.processEvents()
+                time.sleep(0.01)
+            self.assertTrue(dlg.isVisible())
+            self.assertFalse(self.win.drv_cancel.is_set())
+            deadline = time.time() + 5
+            while self.win.drv_busy and time.time() < deadline:
+                QT.processEvents()
+                time.sleep(0.01)
+        self.win.close()
+
+    def test_declined_uac_shows_the_plain_message(self):
+        _, warn = self.run_install(lambda box: box.defaultButton(),
+                                   install_inbox_winusb=dict(side_effect=A.driver.DriverCancelled('Administrator permission was denied')))
+        self.assertNotIn('Let me pick', warn.call_args.args[2])
+
+    def test_no_cancel_button_for_the_windows_driver(self):
+        self.win.show()
+        with mock.patch.object(A.driver, 'install_inbox_winusb', side_effect=lambda *a: time.sleep(0.2) or 'ok'), \
+                mock.patch.object(QMessageBox, 'information'):
+            self.win.start_driver_job('windows', 'Setting Up Camera Driver')
+            self.assertEqual(self.win.drv_dialog.findChildren(QPushButton), [])
+            deadline = time.time() + 5
+            while self.win.drv_busy and time.time() < deadline:
+                QT.processEvents()
+                time.sleep(0.01)
+        self.win.close()
+
+    def test_remove_action_follows_the_binding(self):
+        self.win.act_driver_remove.setVisible(True)
+        self.assertFalse(self.win.act_driver_remove.isEnabled())
+        self.win.on_log('@binding usbccgp')
+        self.assertFalse(self.win.act_driver_remove.isEnabled())
+        self.win.on_log('@binding winusb')
+        self.assertTrue(self.win.act_driver_remove.isEnabled())
+        self.assertEqual(self.win.act_driver_remove.text(), 'Remove Windows Driver Binding…')
+        self.win.drv_busy = True
+        self.win.update_driver_actions()
+        self.assertFalse(self.win.act_driver_remove.isEnabled())
+
+    def test_remove_flow(self):
+        self.win.show()
+        self.win.binding = 'winusb'
+        with mock.patch.object(QMessageBox, 'exec', lambda box: box.defaultButton().click()), \
+                mock.patch.object(QMessageBox, 'information') as info, \
+                mock.patch.object(A.driver, 'remove_inbox_winusb', return_value='removed') as rm, \
+                mock.patch.object(A.driver, 'binding_state', return_value='usbccgp'):
+            self.win.offer_driver_remove()
+            deadline = time.time() + 5
+            while self.win.drv_busy and time.time() < deadline:
+                QT.processEvents()
+                time.sleep(0.01)
+        rm.assert_called_once()
+        info.assert_called_once()
+        self.win.close()
+
+    def test_banner_does_not_imply_the_vendor_download(self):
+        texts = ' '.join(l.text() for l in self.win.banner.findChildren(QLabel))
+        self.assertNotIn('installed', texts)
+        self.assertNotIn('vendor', texts.lower())
+
+    def test_driver_actions_are_in_the_camera_menu(self):
+        menus = {m.text(): m.menu().actions() for m in self.win.menuBar().actions()}
+        self.assertIn(self.win.act_driver, menus['&Camera'])
+        self.assertIn(self.win.act_driver_remove, menus['&Camera'])
 
 
 if __name__ == '__main__':

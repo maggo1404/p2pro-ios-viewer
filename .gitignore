@@ -11,3 +11,4 @@ bin/auto.crt
 bin/auto.key
 dist/
 build/
+tmp/

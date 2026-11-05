@@ -7,6 +7,15 @@ Mouse on the image:
   left drag    draw a rectangle (max / min / average inside)
   right click  delete the cursor / rectangle under the mouse
 """
+import sys
+if __name__ == '__main__':
+    # Elevated --winusb-bind / --winusb-revert / --winusb-diagnose runs: handled before the heavy imports below
+    # (only stdlib + winusb are loaded), without Qt and without a window.
+    import winusb
+    _rc = winusb.run_cli(sys.argv[1:])
+    if _rc is not None:
+        sys.exit(_rc)
+
 import json
 import os
 import threading
@@ -166,6 +175,22 @@ class ImageView(QWidget):
                 self.rect_drawn.emit(min(s0[0], s1[0]), min(s0[1], s1[1]), max(s0[0], s1[0]), max(s0[1], s1[1]))
 
 
+class BusyDialog(QProgressDialog):
+    """Progress dialog that Esc and the close button can't dismiss while keep_open is set (a job past the point of
+    no return keeps running, so its progress must stay visible)."""
+    keep_open = False
+
+    def reject(self):
+        if not self.keep_open:
+            super().reject()
+
+    def closeEvent(self, e):
+        if self.keep_open:
+            e.ignore()
+        else:
+            super().closeEvent(e)
+
+
 # =====================================================================================
 class MainWindow(QMainWindow):
     theme_key = None
@@ -198,6 +223,9 @@ class MainWindow(QMainWindow):
         self.drv_offered = False
         self.drv_missing = False
         self.drv_connect_after = True
+        self.drv_cancellable = False
+        self.drv_job = 'vendor'                 # what the progress dialog is for: vendor / windows / remove
+        self.binding = 'absent'                 # driver of the connected camera, see driver.binding_state()
         self.conn_text, self.conn_tip = 'Not Connected', ''
 
         self.view = ImageView()
@@ -304,14 +332,18 @@ class MainWindow(QMainWindow):
         self.act_cal_cancel = action('Cancel Calibration', self.cancel_calibration, 'Escape')
         self.act_cal_cancel.setEnabled(False)
         self.act_driver = action('Install Camera Driver…', self.offer_driver_install,
-                                 tip='Download the camera driver from thermalmaster.com and install it (needs admin rights)')
+                                 tip='Use the driver that comes with Windows, or download the vendor driver (needs admin rights)')
         self.act_driver.setVisible(driver.is_windows())
+        self.act_driver_remove = action('Remove Windows Driver Binding…', self.offer_driver_remove,
+                                        tip='Give the camera back to the driver Windows chooses by itself (needs admin rights)')
+        self.act_driver_remove.setVisible(driver.is_windows())
+        self.act_driver_remove.setEnabled(False)
         m = self.menuBar().addMenu('&Camera')
         m.addActions([self.act_connect, self.act_shutter])
         m.addSeparator()
         m.addActions([self.act_cal, self.act_cal_cancel, action('Reset Calibration', self.reset_calibration)])
         m.addSeparator()
-        m.addAction(self.act_driver)
+        m.addActions([self.act_driver, self.act_driver_remove])
 
         m = self.menuBar().addMenu('&Measure')
         m.addAction(action('Clear Cursors', lambda: self.points.clear()))
@@ -344,8 +376,8 @@ class MainWindow(QMainWindow):
         self.banner.setObjectName('banner')
         h = QHBoxLayout(self.banner)
         h.setContentsMargins(12, 6, 8, 6)
-        h.addWidget(QLabel('The camera driver doesn’t seem to be installed.'), 1)
-        b = QPushButton('Install Driver…')
+        h.addWidget(QLabel('The camera needs a USB driver to work with this app.'), 1)
+        b = QPushButton('Set Up Driver…')
         b.clicked.connect(self.offer_driver_install)
         h.addWidget(b)
         b = QPushButton('Not Now')
@@ -561,52 +593,116 @@ class MainWindow(QMainWindow):
         self.drv_connect_after = connect
 
         def work():
+            state = driver.binding_state()
+            self.log_signal.emit('@binding ' + state)
             ok = driver.is_driver_installed()
             self.log_signal.emit('@driver ' + ('missing' if ok is False else 'ok'))
         threading.Thread(target=work, daemon=True).start()
 
+    def refresh_binding(self):
+        if not driver.is_windows():
+            return
+        threading.Thread(target=lambda: self.log_signal.emit('@binding ' + driver.binding_state()), daemon=True).start()
+
+    def update_driver_actions(self):
+        self.act_driver.setEnabled(not self.drv_busy)
+        self.act_driver_remove.setEnabled(not self.drv_busy and self.binding == 'winusb')
+
     def offer_driver_install(self):
         if self.drv_busy:
             return
+        state = self.binding                                # cached: SetupAPI is not queried on the UI thread
         box = QMessageBox(QMessageBox.Question, 'Install Camera Driver',
-                          'Download and install the camera driver?', QMessageBox.Cancel, self)
-        box.setInformativeText('The driver (libusbK, USB 0BDA:5840) comes from thermalmaster.com, in the '
-                               '"Temp Master (P-Serie)" package, about 55 MB. Windows will ask for administrator permission.')
-        install = box.addButton('Install', QMessageBox.AcceptRole)
-        box.setDefaultButton(install)
+                          'Which driver should the camera use?', QMessageBox.Cancel, self)
+        text = ('Windows driver: uses the WinUSB driver that is already part of Windows. Nothing is downloaded. '
+                'Windows asks for administrator permission once, and the camera (USB 0BDA:5840) switches from the '
+                'generic USB composite driver to WinUSB; only the camera\u2019s own driver assignment changes. This '
+                'route has not been confirmed on real hardware yet. To undo it, choose '
+                'Camera > Remove Windows Driver Binding.\n\n'
+                'Vendor driver (the tested option): downloads the libusbK driver from thermalmaster.com, in the "Temp Master (P-Serie)" '
+                'package, about 55 MB. Windows asks for administrator permission.')
+        if state == 'libusbk':
+            text += ('\n\nThe camera currently uses the vendor driver (libusbK). The Windows driver replaces it; '
+                     'the Thermal Master app may need the vendor driver back.')
+        elif state == 'winusb':
+            text += '\n\nThe camera already uses the Windows driver.'
+        elif state == 'absent':
+            text += '\n\nThe Windows driver can only be set while the camera is plugged in.'
+        box.setInformativeText(text)
+        windows = box.addButton('Try Windows Driver', QMessageBox.AcceptRole)
+        vendor = box.addButton('Download Vendor Driver…', QMessageBox.ActionRole)
+        box.setDefaultButton(windows)
         box.exec()
-        if box.clickedButton() != install:
+        chosen = box.clickedButton()
+        if chosen == windows:
+            self.start_driver_job('windows', 'Setting Up Camera Driver', replace_libusbk=(state == 'libusbk'))
+        elif chosen == vendor:
+            self.start_driver_job('vendor', 'Installing Camera Driver')
+
+    def offer_driver_remove(self):
+        if self.drv_busy:
             return
+        box = QMessageBox(QMessageBox.Question, 'Remove Windows Driver Binding',
+                          'Remove the Windows driver binding?', QMessageBox.Cancel, self)
+        box.setInformativeText('The camera goes back to the driver Windows chooses by itself (or the vendor driver, '
+                               'if it is installed). Windows asks for administrator permission. Afterwards, unplug '
+                               'and replug the camera. The app needs a driver again to reach the camera.')
+        remove = box.addButton('Remove', QMessageBox.AcceptRole)
+        box.setDefaultButton(remove)
+        box.exec()
+        if box.clickedButton() == remove:
+            self.start_driver_job('remove', 'Removing Windows Driver Binding')
+
+    def start_driver_job(self, job, title, replace_libusbk=False):
         self.banner.hide()
         self.drv_busy = True
-        self.act_driver.setEnabled(False)
+        self.drv_job = job
+        self.update_driver_actions()
         self.drv_cancel.clear()
-        dlg = QProgressDialog('Starting…', 'Cancel', 0, 0, self)
-        dlg.setWindowTitle('Installing Camera Driver')
+        # only the download can be cancelled; the Windows driver steps end at the administrator prompt
+        dlg = BusyDialog('Starting…', 'Cancel' if job == 'vendor' else None, 0, 0, self)
+        dlg.setWindowTitle(title)
         dlg.setWindowModality(Qt.WindowModal)
         dlg.setMinimumDuration(0)
         dlg.setAutoClose(False)
         dlg.setAutoReset(False)
-        dlg.canceled.connect(self.drv_cancel.set)
+        self.drv_cancellable = job == 'vendor'
+        dlg.keep_open = job != 'vendor'
+        dlg.canceled.connect(self.on_drv_canceled)
         dlg.show()
         self.drv_dialog = dlg
 
         def work():
             try:
-                msg = driver.install_from_download(self.drv_status.emit, self.drv_progress.emit, self.drv_cancel)
+                if job == 'vendor':
+                    msg = driver.install_from_download(self.drv_status.emit, self.drv_progress.emit, self.drv_cancel)
+                elif job == 'windows':
+                    msg = driver.install_inbox_winusb(self.drv_status.emit, replace_libusbk)
+                else:
+                    msg = driver.remove_inbox_winusb(self.drv_status.emit)
                 self.drv_done.emit(True, msg)
             except driver.DriverCancelled as e:
                 self.drv_done.emit(False, '' if str(e) == 'cancelled' else str(e))
             except driver.DriverError as e:
-                self.drv_done.emit(False, str(e))
+                msg = str(e)
+                if job == 'windows' and not isinstance(e, (driver.DriverNeedsConfirmation, driver.DriverCameraAbsent)):
+                    msg += '\n\n' + driver.fallback_text()
+                self.drv_done.emit(False, msg)
             except Exception as e:
                 self.drv_done.emit(False, f'{type(e).__name__}: {e}')
         threading.Thread(target=work, daemon=True).start()
+
+    def on_drv_canceled(self):
+        """Cancel (or Esc) on the progress dialog: stops the download; otherwise the dialog just stays."""
+        if self.drv_cancellable:
+            self.drv_cancel.set()
 
     def on_drv_status(self, s):
         if self.drv_dialog:
             self.drv_dialog.setLabelText(s)
             if 'administrator' in s or 'vendor' in s:       # past the point where cancelling is possible
+                self.drv_cancellable = False
+                self.drv_dialog.keep_open = True
                 self.drv_dialog.setCancelButton(None)
                 self.drv_dialog.setRange(0, 0)
 
@@ -618,18 +714,24 @@ class MainWindow(QMainWindow):
 
     def on_drv_done(self, ok, msg):
         self.drv_busy = False
-        self.act_driver.setEnabled(True)
+        self.update_driver_actions()
         if self.drv_dialog:
+            self.drv_dialog.keep_open = False
             self.drv_dialog.canceled.disconnect()           # close() would emit canceled()
             self.drv_dialog.close()
             self.drv_dialog = None
+        self.refresh_binding()
+        QTimer.singleShot(4000, self.refresh_binding)       # the device node restarts; unplugging changes it again
         if ok:
-            self.drv_missing = False
+            if self.drv_job != 'remove':
+                self.drv_missing = False
             QMessageBox.information(self, 'Camera Driver', msg)
         else:
             self.banner.setVisible(self.drv_missing)
+            failed = 'The driver binding could not be removed.' if self.drv_job == 'remove' \
+                else 'The driver could not be installed.'
             if msg:
-                QMessageBox.warning(self, 'Camera Driver', 'The driver could not be installed.\n\n' + msg)
+                QMessageBox.warning(self, 'Camera Driver', failed + '\n\n' + msg)
 
     # ------------------------------------------------------------------ camera
     def connect_camera(self):
@@ -639,6 +741,7 @@ class MainWindow(QMainWindow):
             self.cam.close()
             self.cam = None
         self.connecting = True
+        self.refresh_binding()
         self.act_connect.setEnabled(False)
         self.set_connection('Connecting…', 'Takes about 6 seconds')
         self.view.img = None
@@ -664,6 +767,9 @@ class MainWindow(QMainWindow):
             self.banner.show()
             if self.drv_connect_after:
                 self.connect_camera()                   # still try: the driver check can be wrong
+        elif s.startswith('@binding'):
+            self.binding = s[9:]
+            self.update_driver_actions()
         elif s == '@driver ok':
             if self.drv_connect_after:
                 self.connect_camera()
@@ -1185,7 +1291,6 @@ class MainWindow(QMainWindow):
 
 
 def main():
-    import sys
     app = QApplication(sys.argv)
     w = MainWindow()
     w.show()

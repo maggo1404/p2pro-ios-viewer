@@ -1,5 +1,10 @@
 """Camera driver check + installation (no Qt imports).
 
+Two ways to get the camera onto a driver libusb can open:
+  1. the driver that ships with Windows (winusb.sys / winusb.inf): bound with SetupAPI in winusb.py, one UAC prompt,
+     nothing downloaded (install_inbox_winusb / remove_inbox_winusb below);
+  2. the vendor's libusbK package, described next (install_from_download).
+
 The P2 Pro (USB 0BDA:5840) needs the libusbK driver from the vendor's `P2Pro.inf`. The vendor only ships it
 inside the Windows PC app installer, which we fetch from the Thermal Master download centre:
 
@@ -24,6 +29,7 @@ import urllib.request
 import zipfile
 
 import inno
+import winusb
 
 VID_PID = 'VID_0BDA&PID_5840'
 INF_NAME = 'P2Pro.inf'
@@ -139,6 +145,8 @@ def is_driver_installed():
     if not is_windows():
         return True
     try:
+        if winusb.binding_state() in ('winusb', 'libusbk'):      # the connected camera is bound to a usable driver
+            return True
         store = _store_check()
         if store:
             return True
@@ -489,3 +497,75 @@ def install_from_download(status=None, progress=None, cancel=None):
                     return 'Driver installed (vendor installer). Unplug and replug the camera.'
                 time.sleep(2)
         raise DriverError(msg + ' Install the Thermal Master PC app once to get the driver.')
+
+
+# --------------------------------------------------------------------------------- inbox WinUSB (no download)
+class DriverCameraAbsent(DriverError):
+    """The camera isn't plugged in."""
+
+
+class DriverNeedsConfirmation(DriverError):
+    """The camera is on the vendor's libusbK driver; replacing it must be confirmed by the user."""
+
+
+def binding_state():
+    """See winusb.binding_state: 'winusb' / 'libusbk' / 'usbccgp' / other service / 'absent' / 'unknown'."""
+    return winusb.binding_state()
+
+
+def fallback_text():
+    return winusb.fallback_text()
+
+
+def log_path():
+    return winusb.default_log_path()
+
+
+def _elevated_winusb(action, replace_libusbk=False, timeout=300):
+    """Run this program again, elevated, with a winusb flag (handled at the top of app.py before Qt starts).
+    Returns the result dict that the elevated run wrote; raises DriverCancelled / DriverError."""
+    if not is_windows():
+        raise DriverError('this is only available on Windows')
+    with workdir() as wd:
+        result = os.path.join(wd, 'result.json')
+        args = winusb.build_args(action, result, winusb.default_log_path(), replace_libusbk)
+        if getattr(sys, 'frozen', False):
+            exe, params = sys.executable, subprocess.list2cmdline(args)
+        else:
+            script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'app.py')
+            exe, params = sys.executable, subprocess.list2cmdline([script] + args)
+        code = run_elevated(exe, params, cwd=winusb.system_directory(), show=0, timeout=timeout)
+        res = winusb.read_result(result)
+    if res is None:
+        raise DriverError(f'The administrator step ended without a result (exit code {code}). '
+                          f'Details: {winusb.default_log_path()}')
+    if not res.get('ok'):
+        if res.get('call') == winusb.CALL_ABSENT:
+            raise DriverCameraAbsent(res.get('message') or 'The camera is not connected. Plug it in first.')
+        raise DriverError(res.get('message') or f'failed (exit code {code}). Details: {winusb.default_log_path()}')
+    return res
+
+
+def install_inbox_winusb(status=None, replace_libusbk=False):
+    """Bind the connected camera to the WinUSB driver that ships with Windows. Returns a message for the user.
+    Raises DriverNeedsConfirmation (on libusbK without replace_libusbk), DriverCancelled (UAC declined), DriverError."""
+    say = status or (lambda s: None)
+    state = binding_state()
+    if state == 'winusb' and winusb.app_guid_present():
+        return 'The camera already uses the Windows driver (WinUSB).'
+    if state == 'absent':
+        raise DriverCameraAbsent('The camera is not connected. Plug it in first, then try again.')
+    if state == 'libusbk' and not replace_libusbk:
+        raise DriverNeedsConfirmation('The camera uses the vendor driver (libusbK). Replacing it needs confirmation.')
+    say('Waiting for administrator permission...')
+    res = _elevated_winusb('bind', replace_libusbk)
+    msg = res.get('message') or 'Driver set.'
+    return msg if 'already uses' in msg else msg + ' Unplug and replug the camera.'
+
+
+def remove_inbox_winusb(status=None):
+    """Undo the binding: remove the camera's device node (pnputil, elevated) so Windows chooses a driver again."""
+    say = status or (lambda s: None)
+    say('Waiting for administrator permission...')
+    res = _elevated_winusb('revert')
+    return res.get('message') or 'The Windows driver binding was removed. Unplug and replug the camera.'

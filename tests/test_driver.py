@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import driver  # noqa: E402
@@ -66,6 +67,29 @@ class Pnputil(unittest.TestCase):
         self.assertFalse(driver.service_is_usable('usbccgp'))
         self.assertTrue(driver.pnputil_ok(3010) and driver.pnputil_ok(259) and not driver.pnputil_ok(1))
         self.assertIn('not signed', driver.pnputil_message(0xE000022F))
+
+
+class Installed(unittest.TestCase):
+    def check(self, state, store=None, reg=None):
+        with mock.patch.object(driver, 'is_windows', return_value=True), \
+                mock.patch.object(driver.winusb, 'binding_state', return_value=state), \
+                mock.patch.object(driver, '_store_check', return_value=store), \
+                mock.patch.object(driver, '_registry_check', return_value=reg):
+            return driver.is_driver_installed()
+
+    def test_bound_camera_counts_as_installed(self):
+        self.assertTrue(self.check('winusb', store=False, reg=False))
+        self.assertTrue(self.check('libusbk', store=False, reg=False))
+
+    def test_old_behaviour_is_kept(self):
+        self.assertTrue(self.check('usbccgp', store=True))                  # P2Pro.inf in the store is still enough
+        self.assertTrue(self.check('absent', reg=True))
+        self.assertFalse(self.check('usbccgp', store=False, reg=False))
+        self.assertIsNone(self.check('absent', store=None, reg=None))
+
+    def test_not_windows(self):
+        with mock.patch.object(driver, 'is_windows', return_value=False):
+            self.assertTrue(driver.is_driver_installed())
 
 
 class Traversal(unittest.TestCase):
