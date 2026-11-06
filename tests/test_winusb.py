@@ -520,6 +520,29 @@ class DriverIntegration(unittest.TestCase):
         with self.assertRaises(driver.DriverError):
             driver._elevated_winusb('bind')
 
+    def test_result_directory_does_not_use_mkdtemp(self):
+        """mkdtemp's ACL hides the elevated run's result file from the app: a success was reported as an error."""
+        fake, _ = self.elevated(message='done')
+        with mock.patch.object(driver, 'is_windows', return_value=True), \
+                mock.patch.object(driver, 'binding_state', return_value='usbccgp'), \
+                mock.patch.object(driver, 'run_elevated', fake), \
+                mock.patch.object(driver.tempfile, 'mkdtemp', side_effect=AssertionError('mkdtemp used')):
+            self.assertIn('done', driver.install_inbox_winusb())
+
+    def test_result_directory_is_removed(self):
+        with driver.result_dir() as d:
+            self.assertTrue(os.path.isdir(d))
+            self.assertEqual(os.path.dirname(d), tempfile.gettempdir())
+        self.assertFalse(os.path.exists(d))
+
+    @unittest.skipUnless(sys.platform == 'win32', 'checks a real Windows ACL')
+    def test_result_directory_acl_names_the_user(self):
+        """The user must be listed by name: an elevated run's file is owned by Administrators, so OWNER RIGHTS, the
+        only entry that mkdtemp's ACL has for the user, does not apply to the unelevated app."""
+        with driver.result_dir() as d:
+            acl = subprocess.run(['icacls', d], capture_output=True, text=True, check=True).stdout
+        self.assertIn(os.environ['USERNAME'].lower(), acl.lower())
+
 
 if __name__ == '__main__':
     unittest.main()
