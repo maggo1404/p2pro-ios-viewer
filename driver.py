@@ -17,6 +17,7 @@ import contextlib
 import html as htmllib
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -377,6 +378,20 @@ def workdir():
         shutil.rmtree(d, ignore_errors=True)
 
 
+@contextlib.contextmanager
+def result_dir():
+    """Directory for a file that an elevated run writes and this unelevated process reads back. mkdtemp does not work
+    here: since Python 3.12.4 its ACL allows only SYSTEM, Administrators and the owner, the file inherits that, and an
+    elevated process's file is owned by Administrators, so reading it is denied. A plain mkdir inherits the ACL of the
+    temp directory, which names the user."""
+    d = os.path.join(tempfile.gettempdir(), f'p2pro_driver_{secrets.token_hex(8)}')
+    os.mkdir(d)
+    try:
+        yield d
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 # --------------------------------------------------------------------------------- installation
 def pnputil_message(code):
     if code == PNPUTIL_OK:
@@ -545,7 +560,7 @@ def _elevated_winusb(action, replace_libusbk=False, timeout=300):
     Returns the result dict that the elevated run wrote; raises DriverCancelled / DriverError."""
     if not is_windows():
         raise DriverError('this is only available on Windows')
-    with workdir() as wd:
+    with result_dir() as wd:
         result = os.path.join(wd, 'result.json')
         args = winusb.build_args(action, result, winusb.default_log_path(), replace_libusbk)
         if getattr(sys, 'frozen', False):
